@@ -1,0 +1,22 @@
+SYNTHETIC SAMPLE ADVISORY - FOR DEMONSTRATION ONLY
+
+Advisory ID: SYN-CSC-2026-1101
+CVE-style reference: CVE-2026-90001 (synthetic)
+
+Vendor: Acme Networks (Cisco-style sample)
+Product: Catalyst 9300 Series Switches
+Affected software: IOS XE 17.9.1, 17.9.2, 17.9.3, 17.9.4, 17.9.5
+Severity: High
+
+Description:
+A synthetic vulnerability in the sample management interface could allow
+an unauthenticated remote sender to cause a reload of the affected device.
+This text is invented for demonstration and does not describe a real product
+defect.
+
+Fixed software: IOS XE 17.9.6 or later, and IOS XE 17.12.4 or later.
+Action deadline: Apply the fixed software or an approved workaround
+before 2026-11-20.
+
+Workaround: Restrict management access to trusted networks until fixed
+software is installed.

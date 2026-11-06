@@ -1,0 +1,385 @@
+{
+ "sample1": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.94,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.91,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.88,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 696,
+     "p_verify": 0.99,
+     "start": 686,
+     "value": "2026-11-20"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 82,
+     "p_verify": 0.99,
+     "start": 65,
+     "value": "SYN-CSC-2026-1101"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 246,
+       "p_verify": 0.99,
+       "start": 240,
+       "value": "17.9.1"
+      },
+      {
+       "confidence": 0.99,
+       "end": 254,
+       "p_verify": 0.99,
+       "start": 248,
+       "value": "17.9.2"
+      },
+      {
+       "confidence": 0.99,
+       "end": 262,
+       "p_verify": 0.99,
+       "start": 256,
+       "value": "17.9.3"
+      },
+      {
+       "confidence": 0.99,
+       "end": 270,
+       "p_verify": 0.99,
+       "start": 264,
+       "value": "17.9.4"
+      },
+      {
+       "confidence": 0.99,
+       "end": 278,
+       "p_verify": 0.99,
+       "start": 272,
+       "value": "17.9.5"
+      }
+     ],
+     "value": [
+      "17.9.1",
+      "17.9.2",
+      "17.9.3",
+      "17.9.4",
+      "17.9.5"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 130,
+     "p_verify": 0.99,
+     "start": 104,
+     "value": "CVE-2026-90001 (synthetic)"
+    },
+    "fixed_version": {
+     "confidence": 0.99,
+     "end": 609,
+     "p_verify": 0.99,
+     "start": 558,
+     "value": "IOS XE 17.9.6 or later, and IOS XE 17.12.4 or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 213,
+       "p_verify": 0.99,
+       "start": 184,
+       "value": "Catalyst 9300 Series Switches"
+      }
+     ],
+     "value": [
+      "Catalyst 9300 Series Switches"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 293,
+     "p_verify": 0.99,
+     "start": 289,
+     "value": "High"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 174,
+     "p_verify": 0.99,
+     "start": 140,
+     "value": "Acme Networks (Cisco-style sample)"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.95,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.03,
+     "supported": 0.96,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.96,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.04,
+   "verdict": "grounded"
+  }
+ },
+ "sample2": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.93,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.05,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.22,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 664,
+     "p_verify": 0.99,
+     "start": 654,
+     "value": "2026-12-15"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 82,
+     "p_verify": 0.99,
+     "start": 65,
+     "value": "SYN-JUN-2026-1102"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 264,
+       "p_verify": 0.99,
+       "start": 258,
+       "value": "21.4R1"
+      },
+      {
+       "confidence": 0.99,
+       "end": 272,
+       "p_verify": 0.99,
+       "start": 266,
+       "value": "21.4R2"
+      },
+      {
+       "confidence": 0.99,
+       "end": 280,
+       "p_verify": 0.99,
+       "start": 274,
+       "value": "22.2R1"
+      }
+     ],
+     "value": [
+      "21.4R1",
+      "21.4R2",
+      "22.2R1"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 130,
+     "p_verify": 0.99,
+     "start": 104,
+     "value": "CVE-2026-90002 (synthetic)"
+    },
+    "fixed_version": {
+     "confidence": 0.99,
+     "end": 612,
+     "p_verify": 0.99,
+     "start": 558,
+     "value": "Junos OS 21.4R3 or later, and Junos OS 22.2R2 or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 215,
+       "p_verify": 0.99,
+       "start": 210,
+       "value": "MX240"
+      },
+      {
+       "confidence": 0.99,
+       "end": 222,
+       "p_verify": 0.99,
+       "start": 217,
+       "value": "MX480"
+      },
+      {
+       "confidence": 0.99,
+       "end": 229,
+       "p_verify": 0.99,
+       "start": 224,
+       "value": "MX960"
+      },
+      {
+       "confidence": 0.99,
+       "end": 200,
+       "p_verify": 0.99,
+       "start": 191,
+       "value": "MX Series"
+      }
+     ],
+     "value": [
+      "MX240",
+      "MX480",
+      "MX960",
+      "MX Series"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 297,
+     "p_verify": 0.99,
+     "start": 291,
+     "value": "Medium"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 181,
+     "p_verify": 0.99,
+     "start": 140,
+     "value": "Juniper-style Networks (synthetic sample)"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.93,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.05,
+     "supported": 0.94,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.94,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.06,
+   "verdict": "grounded"
+  }
+ },
+ "sample3": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.18,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.07,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.31,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 79,
+     "p_verify": 0.99,
+     "start": 61,
+     "value": "SYN-KISA-2026-1103"
+    },
+    "affected_versions": {
+     "confidence": 0.0,
+     "items": [],
+     "value": []
+    },
+    "cve_id": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "fixed_version": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 210,
+       "p_verify": 0.99,
+       "start": 197,
+       "value": "Catalyst 9300"
+      }
+     ],
+     "value": [
+      "Catalyst 9300"
+     ]
+    },
+    "severity": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "vendor": {
+     "confidence": 0.0,
+     "value": ""
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.21,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.87,
+     "supported": 0.12,
+     "verdict": "ungrounded"
+    }
+   ],
+   "grounded": 0.12,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.88,
+   "verdict": "ungrounded"
+  }
+ }
+}

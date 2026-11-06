@@ -1,0 +1,17 @@
+SYNTHETIC SAMPLE NOTICE - FOR DEMONSTRATION ONLY
+
+Notice ID: SYN-KISA-2026-1103
+
+Subject: Precautionary notice for a network device product family
+
+A sample security notice has been issued for the Catalyst 9300 product
+family. Operators are asked to review their environments and follow
+general vendor guidance.
+
+This synthetic notice does not state which software versions are
+affected, does not provide a fixed version, and does not give a
+specific action deadline. Version scope and remediation details are
+to be confirmed from an authoritative follow-up notice.
+
+No CVE-style reference is given in this sample notice.
+Severity: Not stated.
