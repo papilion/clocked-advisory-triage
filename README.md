@@ -429,3 +429,10 @@ coverage for both input modes.
   Clocked API in live mode).
 - The matcher is deliberately conservative: anything it cannot prove
   becomes CANNOT DETERMINE, by design.
+
+## Deployment
+
+The live demo at https://advisory-triage.streamlit.app/ auto-deploys
+from the `main` branch of this repository (Streamlit Cloud). The
+Clocked API key is provided to the deployment as a Streamlit secret
+(`CLOCKED_API_KEY`); it is never committed to the repo.
