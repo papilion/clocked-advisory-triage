@@ -265,6 +265,10 @@ STRINGS = {
             "Vendor-traced: %d of %d advisories (sources: CSAF / "
             "JSA / CNA)"
         ),
+        "feeds_traced_candidates": (
+            "Vendor-traced: %d of %d candidates (sources: CSAF / "
+            "JSA / CNA)"
+        ),
         "vendor_source": "Vendor source: %s \u2014 %s",
         "uploads_intro": (
             "Upload advisory pages you saved from your own browser - "
@@ -489,6 +493,9 @@ STRINGS = {
         "feeds_kev_empty": "KEV: 인벤토리와 일치하는 카탈로그 항목이 없습니다.",
         "feeds_kev_failed": "KEV: 피드를 가져오지 못했습니다 (%s)",
         "feeds_traced": "제조사 원문 추적: %d/%d건 (출처: CSAF / JSA / CNA)",
+        "feeds_traced_candidates": (
+            "제조사 원문 추적: %d/%d 후보 (출처: CSAF / JSA / CNA)"
+        ),
         "vendor_source": "제조사 원문: %s \u2014 %s",
         "uploads_intro": (
             "본인 브라우저에서 저장한 권고 페이지를 올리세요 — 벤더 "
@@ -1023,7 +1030,17 @@ def _render_batch_mode(s, lang):
             screening.get("local_not_affected", 0),
             screening.get("not_in_fleet", 0),
             feed_info.get("deep_triaged", 0)))
-        if feed_info.get("traced"):
+        if "traced_for_screen" in feed_info and \
+                "candidates" in feed_info:
+            # Feed pipeline: the trace pass ran over the screened
+            # candidates (up to its cap), NOT over the deep-triaged
+            # subset - say "traced_for_screen of candidates", or
+            # the numbers read as nonsense (80 of 30).
+            if feed_info.get("traced_for_screen"):
+                st.caption(s["feeds_traced_candidates"] % (
+                    feed_info.get("traced_for_screen", 0),
+                    feed_info.get("candidates", 0)))
+        elif feed_info.get("traced"):
             st.caption(s["feeds_traced"] % (
                 feed_info.get("traced", 0),
                 feed_info.get("deep_triaged", 0)))

@@ -502,6 +502,177 @@ def test_pipeline_judge_all_lifts_budget():
     assert all(r.get("basis") != "local-screen" for r in rows)
 
 
+# ------------------------- row-count invariant ----------------------
+# Every collected item must be accounted for by exactly one row:
+# a local screen row, a re-screened row, a deep-triaged row, or a
+# budget row. Items screened out as not-in-fleet get NO row by
+# design - they live only in the collection/screening counts -
+# so the strict identity rows == collection total is asserted
+# across the fleet-only fixture scenarios (which pin
+# not_in_fleet == 0), and the general identity
+# rows + not_in_fleet == total gets its own test below.
+
+def _assert_row_invariant(rows, stats):
+    assert stats["screening"]["not_in_fleet"] == 0
+    assert len(rows) == stats["collection"]["total"]
+
+
+def test_pipeline_row_count_matches_collection_total():
+    # Bulk scenario WITH KEV merging: 35 NVD records, two of
+    # which a KEV entry merges into - the collection total stays
+    # 35 and every one of them must come back as a row.
+    nvd_payload, catalog = _bulk_pipeline_inputs()
+    rows, stats = run_feed_pipeline(
+        TWO_DEVICE_TEXT, mock=True,
+        nvd_fetcher=_term_fetcher(
+            {"juniper": nvd_payload,
+             "cisco": {"vulnerabilities": []}}),
+        kev_fetcher=lambda url: catalog, now=NOW)
+    assert stats["collection"]["kev_merged"] == 2
+    assert stats["collection"]["total"] == 35
+    _assert_row_invariant(rows, stats)
+
+    # Mixed scenario: one local clear + one deep-triaged hit.
+    hit = _vuln("CVE-2026-6001", "2026-05-01T00:00:00.000",
+                "Cisco IOS XE flaw.", score=9.8, severity="CRITICAL",
+                configurations=_configs(
+                    "ios_xe", versionStartIncluding="17.6",
+                    versionEndExcluding="17.6.6a"))
+    cleared = _vuln("CVE-2026-6002", "2026-04-01T00:00:00.000",
+                    "Juniper Junos OS flaw.", score=5.0,
+                    severity="MEDIUM",
+                    configurations=_configs(
+                        "junos", vendor="juniper",
+                        versionEndExcluding="20.4"))
+    rows, stats = run_feed_pipeline(
+        "SW-01, Catalyst 9300, 17.6.5\nRTR-01, MX480, 21.3R3\n",
+        mock=True,
+        nvd_fetcher=_term_fetcher({
+            "cisco": {"vulnerabilities": [hit]},
+            "juniper": {"vulnerabilities": [cleared]}}),
+        kev_fetcher=lambda url: {"vulnerabilities": []}, now=NOW)
+    assert stats["collection"]["total"] == 2
+    _assert_row_invariant(rows, stats)
+
+    # Judge-all scenario (budget lifted, so no budget rows).
+    nvd_payload, catalog = _bulk_pipeline_inputs(count=12)
+    rows, stats = run_feed_pipeline(
+        TWO_DEVICE_TEXT, mock=True, judge_all=True,
+        nvd_fetcher=_term_fetcher(
+            {"juniper": nvd_payload,
+             "cisco": {"vulnerabilities": []}}),
+        kev_fetcher=lambda url: catalog, now=NOW)
+    assert stats["collection"]["total"] == 12
+    _assert_row_invariant(rows, stats)
+
+    # Re-screen scenario: one candidate cleared by its traced
+    # CNA ranges, one survivor deep-triaged - still one row per
+    # collected item.
+    cleared = _vuln("CVE-2026-8001", "2026-09-01T00:00:00.000",
+                    "Juniper Junos OS flaw.", score=8.8,
+                    severity="HIGH")
+    survivor = _vuln("CVE-2026-8002", "2026-08-01T00:00:00.000",
+                     "Juniper Junos OS flaw.", score=5.0,
+                     severity="MEDIUM")
+
+    def json_fetch_clear(url):
+        if url == batch.cvelist_url("CVE-2026-8001"):
+            return _clearing_cna("CVE-2026-8001")
+        raise batch.FetchError("no fixture record")
+
+    rows, stats = run_feed_pipeline(
+        JUNIPER_ONLY_TEXT, mock=True,
+        nvd_fetcher=_term_fetcher(
+            {"juniper": {"vulnerabilities": [cleared, survivor]}}),
+        kev_fetcher=lambda url: {"vulnerabilities": []},
+        trace_json_fetcher=json_fetch_clear, now=NOW)
+    assert stats["collection"]["total"] == 2
+    _assert_row_invariant(rows, stats)
+
+    # Re-screen promotion scenario: 31 candidates for a budget
+    # of 30, one re-screened clear - 31 rows, no budget rows.
+    vulns = []
+    base = datetime.date(2026, 1, 1)
+    for i in range(31):
+        published = (base + datetime.timedelta(days=i)).isoformat()
+        score, severity = (3.0, "LOW")
+        if i == 0:
+            score, severity = (9.8, "CRITICAL")
+        vulns.append(_vuln(
+            "CVE-2026-%04d" % (8100 + i),
+            published + "T00:00:00.000",
+            "Juniper Junos OS flaw %d." % i,
+            score=score, severity=severity))
+
+    def json_fetch_promote(url):
+        if url == batch.cvelist_url("CVE-2026-8100"):
+            return _clearing_cna("CVE-2026-8100")
+        raise batch.FetchError("no fixture record")
+
+    rows, stats = run_feed_pipeline(
+        JUNIPER_ONLY_TEXT, mock=True,
+        nvd_fetcher=_term_fetcher({"juniper": {
+            "vulnerabilities": vulns}}),
+        kev_fetcher=lambda url: {"vulnerabilities": []},
+        trace_json_fetcher=json_fetch_promote, now=NOW)
+    assert stats["collection"]["total"] == 31
+    _assert_row_invariant(rows, stats)
+
+    # Bundled-fixture scenario (the AppTest demo path): NVD and
+    # KEV fixtures merged over the bundled sample inventory.
+    inventory_text = (ROOT / "samples" / "inventory_sample.txt"
+                      ).read_text(encoding="utf-8")
+    rows, stats = run_feed_pipeline(inventory_text, mock=True,
+                                    now=NOW)
+    assert stats["collection"]["total"] == 4
+    _assert_row_invariant(rows, stats)
+
+
+def test_pipeline_row_accounting_identity_with_foreign_item():
+    # The general accounting identity: rows + not_in_fleet ==
+    # collection total, always - screen_feed_items partitions
+    # every collected item into exactly one of {local row,
+    # candidate, screened out}, and the pipeline turns every
+    # candidate into exactly one row (re-screened, deep-triaged
+    # or budget). So a hand tally of displayed rows against the
+    # collected count can come up short only by exactly the
+    # not-in-fleet count, never by a silent drop.
+    #
+    # This scenario also pins a conservative quirk: the FortiOS
+    # item below arrives under the Juniper keyword query, and
+    # the collector's header line names that query ("CVE-... -
+    # Juniper Junos"), so the text scan ties it to the fleet's
+    # Junos device with no ranges to clear it - it stays an
+    # uncertain CANDIDATE (and gets a row) instead of screening
+    # out. Screening errs toward judging, never toward dropping.
+    foreign = _vuln("CVE-2026-9101", "2026-05-01T00:00:00.000",
+                    "Fortinet FortiOS flaw.", score=5.0,
+                    severity="MEDIUM",
+                    configurations=_configs(
+                        "fortios", vendor="fortinet",
+                        versionStartIncluding="7.0",
+                        versionEndExcluding="7.4.4"))
+    local = _vuln("CVE-2026-9102", "2026-06-01T00:00:00.000",
+                  "Juniper Junos OS flaw.", score=5.0,
+                  severity="MEDIUM",
+                  configurations=_configs(
+                      "junos", vendor="juniper",
+                      versionEndExcluding="20.4"))
+    rows, stats = run_feed_pipeline(
+        TWO_DEVICE_TEXT, mock=True,
+        nvd_fetcher=_term_fetcher(
+            {"juniper": {"vulnerabilities": [foreign, local]},
+             "cisco": {"vulnerabilities": []}}),
+        kev_fetcher=lambda url: {"vulnerabilities": []}, now=NOW)
+    assert stats["collection"]["total"] == 2
+    assert len(rows) + stats["screening"]["not_in_fleet"] == \
+        stats["collection"]["total"]
+    # Every collected item is accounted for: the Junos item as a
+    # local clear, the FortiOS item as a judged candidate row.
+    assert {r["label"] for r in rows} == {
+        "CVE-2026-9101", "CVE-2026-9102"}
+
+
 # ----------------- trace-assisted re-screening -----------------------
 # Most fresh CVEs carry no NVD configurations at all, so the
 # initial screen can only mark them uncertain. The pipeline
@@ -714,3 +885,35 @@ def test_sample_inventory_csv_parses_to_six_devices():
     for vendor in ("cisco", "juniper", "f5", "fortinet",
                    "microsoft"):
         assert vendor in vendors
+
+
+# ------------------------- traced caption (AppTest) ------------------
+
+def test_feeds_caption_counts_traced_candidates_not_triaged():
+    # Regression test for the deployed "Vendor-traced: 80 of 30"
+    # caption: the numerator is the trace-for-screen count and
+    # the denominator is the CANDIDATE count - never the smaller
+    # deep-triaged count the old caption divided by. The bundled
+    # fixtures make the numbers deterministic: 4 collected items,
+    # all 4 screen in as candidates, the trace pass attempts all
+    # 4 (2 resolve to vendor documents), and 4 are deep-triaged.
+    at = AppTest.from_file(APP)
+    at.run()
+    assert not at.exception
+    at.radio[1].set_value("feeds").run()
+    assert not at.exception
+    matches = [b for b in at.button
+               if "Run Batch" in (b.label or "")]
+    assert len(matches) == 1, "buttons: %r" % [
+        b.label for b in at.button]
+    matches[0].click().run()
+    assert not at.exception
+    feed_info = at.session_state["feed_info"]
+    assert feed_info["candidates"] == 4
+    assert feed_info["traced_for_screen"] == 4
+    captions = [c.value or "" for c in at.caption]
+    assert any("Vendor-traced: 4 of 4 candidates" in c
+               for c in captions), captions
+    # The old form ("traced of deep-triaged advisories") is gone.
+    assert not any("Vendor-traced: 2 of 4 advisories" in c
+                   for c in captions), captions

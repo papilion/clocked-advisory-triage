@@ -469,9 +469,12 @@ def test_feeds_source_mock_run_yields_summary():
         "CVE-2016-6894"]
     # Mock Mode tracing resolves the fixture-backed routes among
     # the candidates: the Cisco item via its CSAF fixture, the
-    # Juniper item via the CNA fixture - shown in the caption.
+    # Juniper item via the CNA fixture. The caption counts the
+    # trace-for-screen pass over the candidates (4 attempted of
+    # 4 candidates), not the deep-triaged subset.
     captions = [c.value or "" for c in at.caption]
-    assert any("Vendor-traced: 2 of 4" in c for c in captions), captions
+    assert any("Vendor-traced: 4 of 4 candidates" in c
+               for c in captions), captions
 
 
 def test_uploads_source_empty_run_shows_notice():

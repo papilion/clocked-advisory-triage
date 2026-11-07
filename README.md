@@ -1,5 +1,7 @@
 # Advisory Triage for Network Operators
 
+한국어 README: [README.ko.md](README.ko.md)
+
 Give it a **list of advisory links** and your **device inventory as a
 CSV upload** — it fetches every advisory itself and returns **one
 defensible verdict** per advisory — **AFFECTED**, **NOT AFFECTED**,
