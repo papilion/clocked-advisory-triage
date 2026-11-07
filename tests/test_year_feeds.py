@@ -25,7 +25,7 @@ from batch import (  # noqa: E402
     run_feed_pipeline,
     screen_feed_items,
 )
-from triage import parse_inventory  # noqa: E402
+from triage import parse_inventory, run_triage  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -389,6 +389,51 @@ def test_screen_exact_version_uses_cpe_update_field():
     assert stats["uncertain_candidates"] == 0
 
 
+def test_cpe_product_key_nokia_and_extreme():
+    # Nokia SR OS CPEs (sr_os / sros spellings) and Extreme EXOS
+    # CPEs normalize to the fleet product keys the sample Nokia /
+    # Extreme devices carry.
+    assert batch._cpe_product_key("nokia", "sr_os") == "nokia sr os"
+    assert batch._cpe_product_key("nokia", "sros") == "nokia sr os"
+    assert batch._cpe_product_key("Nokia", "7750_sros") == \
+        "nokia sr os"
+    assert batch._cpe_product_key("extreme", "exos") == \
+        "extreme exos"
+    assert batch._cpe_product_key("extremenetworks",
+                                  "extremexos") == "extreme exos"
+    assert batch._PRODUCT_KEY_DISPLAY["nokia sr os"] == "Nokia SR OS"
+    assert batch._PRODUCT_KEY_DISPLAY["extreme exos"] == \
+        "Extreme EXOS"
+
+
+def test_device_product_keys_nokia_and_extreme():
+    devices = parse_inventory(
+        "NOKIA-7750-01, Nokia 7750 SR-12, 21.10.R1\n"
+        "EXTREME-X450-01, Extreme X450a-24x, 12.4.4.10\n")
+    assert batch._device_product_keys(devices[0]) == {"nokia sr os"}
+    assert batch._device_product_keys(devices[1]) == \
+        {"extreme exos"}
+
+
+def test_screen_nokia_sr_os_and_extreme_exos_ranges():
+    inventory = ("NOKIA-7750-01, Nokia 7750 SR-12, 21.10.R1\n"
+                 "EXTREME-X450-01, Extreme X450a-24x, 12.4.4.10\n")
+    # SR OS ranges covering only the 23.x branches: the fleet's
+    # 21.10.R1 sits outside every range -> local NOT AFFECTED.
+    cleared = _item("CVE-2026-7101", [
+        _rng("sr_os", vendor="nokia", start_including="23.2")])
+    # EXOS before 12.5 is affected: 12.4.4.10 is inside -> hit.
+    hit = _item("CVE-2026-7102", [
+        _rng("exos", vendor="extreme", end_excluding="12.5")])
+    rows, candidates, stats = screen_feed_items(
+        [cleared, hit], inventory)
+    assert stats["local_not_affected"] == 1
+    assert stats["candidates"] == 1
+    assert [c["label"] for c in candidates] == ["CVE-2026-7102"]
+    assert rows[0]["label"] == "CVE-2026-7101"
+    assert rows[0]["triage"]["verdict"] == "NOT AFFECTED"
+
+
 # ------------------------- pipeline: budget + ordering ---------------
 
 def _bulk_pipeline_inputs(count=35):
@@ -500,6 +545,102 @@ def test_pipeline_judge_all_lifts_budget():
     assert stats["budget"] == batch.JUDGE_ALL_CAP
     assert stats["deep_triaged"] == 12
     assert all(r.get("basis") != "local-screen" for r in rows)
+
+
+# ------------------------- stage progress --------------------------
+# Every pipeline stage reports through the one progress(index,
+# total, label) callback the UI renders, so a minutes-long feeds
+# run never sits on the static "Collecting vulnerability feeds"
+# spinner text: collection fires per completed vendor-window
+# (plus once for the KEV fetch), screening fires once, tracing
+# fires per attempted candidate, and deep triage keeps its
+# per-item events.
+
+def test_pipeline_progress_events_cover_all_stages():
+    nvd_payload, catalog = _bulk_pipeline_inputs()
+    events = []
+
+    def record(index, total, label):
+        events.append((index, total, label))
+
+    _rows, stats = run_feed_pipeline(
+        TWO_DEVICE_TEXT, mock=True, progress=record,
+        nvd_fetcher=_term_fetcher(
+            {"juniper": nvd_payload,
+             "cisco": {"vulnerabilities": []}}),
+        kev_fetcher=lambda url: catalog, now=NOW)
+    assert events
+    for index, total, _label in events:
+        assert total > 0
+        assert 0 <= index <= total
+    collecting = [e for e in events
+                  if e[2].startswith("Collecting NVD feeds")]
+    kev_events = [e for e in events
+                  if e[2].startswith("Collecting KEV feed")]
+    screening = [e for e in events
+                 if e[2] == "Screening against inventory"]
+    tracing = [e for e in events
+               if e[2].startswith("Tracing vendor source")]
+    triage = [e for e in events
+              if e[1] == FULL_TRIAGE_CAP
+              and e[2].startswith("CVE-")]
+    # Collection: 2 vendors x 4 windows = 8 events at total 8,
+    # the running count in the label reaching the merged total;
+    # the KEV fetch closes the stage at the same total.
+    assert len(collecting) == 8
+    assert all(e[1] == 8 for e in collecting)
+    assert collecting[-1][0] == 8
+    assert "35 collected" in collecting[-1][2]
+    assert len(kev_events) == 1
+    assert kev_events[0][:2] == (8, 8)
+    # Screening: exactly one event.
+    assert screening == [(1, 1, "Screening against inventory")]
+    # Tracing: one event per attempted candidate, its total
+    # matching the pipeline's traced_for_screen count.
+    assert stats["traced_for_screen"] == 35
+    assert len(tracing) == stats["traced_for_screen"]
+    assert all(e[1] == stats["traced_for_screen"] for e in tracing)
+    assert tracing[-1][0] == stats["traced_for_screen"]
+    # Deep triage: per-item events forwarded from run_batch_items.
+    assert len(triage) == stats["deep_triaged"] == FULL_TRIAGE_CAP
+
+    def _positions(pred):
+        return [i for i, e in enumerate(events) if pred(e)]
+
+    # Stage order: collection -> KEV -> screening -> tracing ->
+    # deep triage.
+    assert max(_positions(
+        lambda e: e[2].startswith("Collecting NVD"))) < \
+        _positions(lambda e: e[2].startswith("Collecting KEV"))[0]
+    assert _positions(
+        lambda e: e[2].startswith("Collecting KEV"))[0] < \
+        _positions(
+            lambda e: e[2] == "Screening against inventory")[0]
+    assert _positions(
+        lambda e: e[2] == "Screening against inventory")[0] < \
+        min(_positions(
+            lambda e: e[2].startswith("Tracing vendor source")))
+    assert max(_positions(
+        lambda e: e[2].startswith("Tracing vendor source"))) < \
+        min(_positions(
+            lambda e: e[1] == FULL_TRIAGE_CAP
+            and e[2].startswith("CVE-")))
+
+
+def test_pipeline_progress_labels_korean():
+    inventory_text = (ROOT / "samples" / "inventory_sample.txt"
+                      ).read_text(encoding="utf-8")
+    events = []
+    _rows, _stats = run_feed_pipeline(
+        inventory_text, mock=True, lang="ko",
+        progress=lambda i, t, l: events.append((i, t, l)), now=NOW)
+    labels = [e[2] for e in events]
+    assert any(l.startswith("NVD 피드 수집 중") for l in labels)
+    assert "인벤토리 대조 스크리닝" in labels
+    assert any(l.startswith("제조사 원문 추적") for l in labels)
+    for index, total, _label in events:
+        assert total > 0
+        assert 0 <= index <= total
 
 
 # ------------------------- row-count invariant ----------------------
@@ -854,7 +995,9 @@ def test_local_rows_render_in_batch_results():
     at.session_state["batch_source"] = "feeds"
     at.run()
     assert not at.exception
-    assert len(at.dataframe) == 1
+    # Two dataframes: the batch summary table and the per-device
+    # verdicts table rendered below it.
+    assert len(at.dataframe) == 2
     expander_labels = [e.label for e in at.expander]
     assert any("CVE-2026-5002" in label
                and "NOT AFFECTED" in label
@@ -869,21 +1012,119 @@ def test_local_rows_render_in_batch_results():
     assert "beyond this run's deep-triage budget" in markdown
 
 
+# ------------------- per-device verdicts (app) ---------------------
+
+from app import _device_verdict_summary  # noqa: E402
+
+
+def _batch_row(label, device_rows, verdict="AFFECTED"):
+    return {"status": "ok", "label": label, "url": "",
+            "triage": {"verdict": verdict,
+                       "device_results": device_rows}}
+
+
+def _drow(hostname, model, version, candidate, status):
+    return {"hostname": hostname, "model": model,
+            "version": version, "candidate": candidate,
+            "status": status, "reason": ""}
+
+
+def test_device_verdict_summary_counts_and_order():
+    devices = [
+        {"hostname": "DC-SW-01", "model": "Arista 7050SX3",
+         "version": "4.30.5M"},
+        {"hostname": "CORE-RTR-01", "model": "MX480",
+         "version": "21.3R3"},
+        {"hostname": "IDLE-SW-01", "model": "Catalyst 9300",
+         "version": "17.9.4"},
+    ]
+    rows = [
+        _batch_row("CVE-2026-1111", [
+            _drow("DC-SW-01", "Arista 7050SX3", "4.30.5M", True,
+                  "AFFECTED"),
+            _drow("CORE-RTR-01", "MX480", "21.3R3", True,
+                  "NOT AFFECTED"),
+            # Not a candidate: the advisory does not concern this
+            # device's product at all - not a related row.
+            _drow("IDLE-SW-01", "Catalyst 9300", "17.9.4", False,
+                  "NOT AFFECTED"),
+        ]),
+        _batch_row("CVE-2026-2222", [
+            _drow("CORE-RTR-01", "MX480", "21.3R3", True,
+                  "CANNOT DETERMINE"),
+            _drow("DC-SW-01", "Arista 7050SX3", "4.30.5M", False,
+                  "NOT AFFECTED"),
+        ], verdict="CANNOT DETERMINE"),
+        # Skipped entries carry no per-device verdicts.
+        {"status": "skipped", "label": "CVE-2026-3333", "url": ""},
+    ]
+    summary = _device_verdict_summary(rows, devices, "en")
+    # Affected first, then CANNOT DETERMINE count descending,
+    # then the device with no related advisories - still listed,
+    # so the fleet is fully accounted for.
+    assert [e["hostname"] for e in summary] == [
+        "DC-SW-01", "CORE-RTR-01", "IDLE-SW-01"]
+    dc, core, idle = summary
+    assert dc["affected"] == ["CVE-2026-1111"]
+    assert dc["related"] == 1
+    assert core["cannot"] == ["CVE-2026-2222"]
+    assert core["not_affected"] == 1
+    assert core["related"] == 2
+    assert idle["related"] == 0
+    assert idle["affected"] == [] and idle["cannot"] == []
+    assert idle["not_affected"] == 0
+    assert idle["model"] == "Catalyst 9300"
+    assert idle["version"] == "17.9.4"
+
+
+def test_per_device_verdicts_section_renders():
+    # Seed batch results produced against the bundled sample
+    # inventory (the app's fallback when no CSV is uploaded): a
+    # Mock-Mode triage of sample 1. The section must list every
+    # one of the 11 sample devices - including the Nokia and
+    # Extreme boxes no advisory in the run relates to.
+    inventory_text = (ROOT / "samples" / "inventory_sample.txt"
+                      ).read_text(encoding="utf-8")
+    sample1 = (ROOT / "samples" / "sample1_affected.txt"
+               ).read_text(encoding="utf-8")
+    result = run_triage(sample1, inventory_text)
+    rows = [{"status": "ok", "label": "sample1", "url": "",
+             "triage": result}]
+    at = AppTest.from_file(APP)
+    at.session_state["batch_results"] = rows
+    at.session_state["batch_source"] = "feeds"
+    at.run()
+    assert not at.exception
+    headings = [h.value or "" for h in at.subheader]
+    assert any("Per-device verdicts" in h
+               for h in headings), headings
+    # Batch summary table first, per-device table second.
+    assert len(at.dataframe) == 2
+    frame = at.dataframe[1].value
+    assert len(frame) == 11
+    frame_text = frame.to_string()
+    assert "CORE-SW-01" in frame_text
+    assert "NOKIA-7750-01" in frame_text
+    assert "EXTREME-X450-01" in frame_text
+    assert "No related advisories" in frame_text
+
+
 # ------------------------- sample inventory CSV ----------------------
 
-def test_sample_inventory_csv_parses_to_six_devices():
+def test_sample_inventory_csv_parses_to_eight_devices():
     data = (ROOT / "samples" / "sample_inventory.csv").read_bytes()
     text, meta = parse_inventory_csv(data)
     assert meta["header_mode"] == "header"
-    assert meta["rows_used"] == 6
+    assert meta["rows_used"] == 8
     assert meta["rows_skipped"] == 0
     devices = parse_inventory(text)
-    assert len(devices) == 6
+    assert len(devices) == 8
     vendors = batch.inventory_vendors(devices)
-    # The template spans the fleet-wide scope: network gear, an
-    # F5 load balancer, a firewall, and servers.
+    # The template spans the fleet-wide scope: network gear
+    # (including Nokia SR OS and Extreme EXOS boxes), an F5 load
+    # balancer, a firewall, and servers.
     for vendor in ("cisco", "juniper", "f5", "fortinet",
-                   "microsoft"):
+                   "microsoft", "nokia", "extreme"):
         assert vendor in vendors
 
 

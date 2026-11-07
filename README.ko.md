@@ -121,7 +121,8 @@ GitHub Codespaces** 배지를 클릭하세요:
      기계 판독 피드를 대신 질의합니다: **NVD CVE API**(최대 4개의
      키워드 질의, 인벤토리의 장비 수 기준으로 벤더 우선순위 결정
      — 알려진 네트워크 벤더는 "Cisco IOS XE", "Juniper Junos",
-     "Arista EOS"처럼 선별된 제품 키워드를 사용하고, F5부터
+     "Arista EOS", "Nokia SR OS", "Extreme EXOS"처럼 선별된 제품
+     키워드를 사용하고, F5부터
      Microsoft까지 그 외 플릿 벤더는 "<Vendor> <top product
      token>" 질의를 도출합니다 — API 키 불필요)와 CISA의 **Known
      Exploited Vulnerabilities** 카탈로그(로컬에서 벤더와 모델
@@ -347,9 +348,10 @@ ID, 지어낸 호스트명, 실제 IP 없음, 실제 벤더 텍스트 없음.
 커버합니다: 서술형 버전 경계(샘플 6)와 구성 조건(샘플 7, Arista
 0201 패턴).
 
-샘플 인벤토리(`samples/inventory_sample.txt`): 지어낸 장비 9대
+샘플 인벤토리(`samples/inventory_sample.txt`): 지어낸 장비 11대
 (Catalyst 9300 ×3, Nexus 3064, QFX5110, Arista 7050 ×2,
-ASR1002-X, MX480), 한 줄에 하나씩 `hostname, model, OS version`
+ASR1002-X, MX480, Nokia 7750 SR-12, Extreme X450a-24x), 한 줄에
+하나씩 `hostname, model, OS version`
 형식. 라이브 실행에서는 같은 형식의 본인 내보내기 파일로
 교체하세요.
 

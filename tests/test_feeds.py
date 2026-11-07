@@ -52,7 +52,7 @@ def _sample_devices():
 
 def test_inventory_vendors_from_sample_inventory():
     assert inventory_vendors(_sample_devices()) == [
-        "cisco", "juniper", "arista"]
+        "cisco", "juniper", "arista", "nokia", "extreme"]
 
 
 def test_inventory_vendors_from_product_families():
@@ -63,6 +63,38 @@ def test_inventory_vendors_from_product_families():
     ]
     assert inventory_vendors(devices) == ["juniper", "nokia"]
     assert inventory_vendors([]) == []
+
+
+def test_inventory_vendors_nokia_extreme_signatures():
+    # Signatures beyond the vendor name itself: Nokia's 7750 /
+    # 7250 SR lines and Extreme's Summit / X450 / X650 EXOS
+    # switches are recognized from the hardware model alone.
+    devices = [
+        {"hostname": "A", "model": "7750 SR-12",
+         "version": "21.10.R1"},
+        {"hostname": "B", "model": "7250 IXR-10",
+         "version": "21.10.R1"},
+        {"hostname": "C", "model": "Summit X450a-24x",
+         "version": "12.4.4.10"},
+        {"hostname": "D", "model": "X650-24x",
+         "version": "15.3.5.2"},
+    ]
+    assert inventory_vendors(devices) == ["nokia", "extreme"]
+    assert batch._device_vendor(devices[0]) == "nokia"
+    assert batch._device_vendor(devices[1]) == "nokia"
+    assert batch._device_vendor(devices[2]) == "extreme"
+    assert batch._device_vendor(devices[3]) == "extreme"
+
+
+def test_nvd_query_terms_include_nokia_and_extreme():
+    devices = [
+        {"hostname": "A", "model": "Nokia 7750 SR-12",
+         "version": "21.10.R1"},
+        {"hostname": "B", "model": "Extreme X450a-24x",
+         "version": "12.4.4.10"},
+    ]
+    assert batch._nvd_query_terms(devices) == [
+        "Nokia SR OS", "Extreme EXOS"]
 
 
 # ------------------------- NVD collection ----------------------------
@@ -108,13 +140,17 @@ def test_nvd_collect_parse_sort_and_queries():
             _nvd_vuln("CVE-2024-0003", "2024-04-01T00:00:00.000",
                       "Arista EOS before 4.30.0F is affected."),
         ]},
+        "nokia": {"vulnerabilities": []},
     }
     result = collect_nvd_items(
         _sample_devices(), fetcher=_nvd_fetcher_stub(payloads))
     assert result["status"] == "ok"
     assert result["count"] == 3
+    # The query cap (6) admits all five sample vendors, Nokia and
+    # Extreme included, in device-count order.
     assert result["queries"] == ["Cisco IOS XE", "Juniper Junos",
-                                 "Arista EOS"]
+                                 "Arista EOS", "Nokia SR OS",
+                                 "Extreme EXOS"]
     # Round-robin across vendors (newest first within each vendor),
     # so the Arista item is not crowded out by Cisco's newer batch.
     assert [i["label"] for i in result["items"]] == [
@@ -231,6 +267,31 @@ def test_kev_collect_filter_convert_sort():
         "KEV CVE-2024-1003 \u2014 Juniper Junos OS\n"
         "Date added: 2024-03-01\nDue date: 2024-01-20")
     assert "Required action: Apply mitigations" in first["text"]
+
+
+def test_kev_collect_matches_nokia_and_extreme():
+    # KEV matching runs off the same vendor detection as the NVD
+    # queries: Nokia and Extreme catalog entries match an
+    # inventory carrying their hardware, and unrelated vendors
+    # stay out.
+    devices = [
+        {"hostname": "A", "model": "Nokia 7750 SR-12",
+         "version": "21.10.R1"},
+        {"hostname": "B", "model": "Extreme X450a-24x",
+         "version": "12.4.4.10"},
+    ]
+    catalog = {"vulnerabilities": [
+        _kev_entry("CVE-2024-3001", "Nokia", "SR OS",
+                   "2024-01-05"),
+        _kev_entry("CVE-2024-3002", "Extreme Networks", "EXOS",
+                   "2024-02-01"),
+        _kev_entry("CVE-2024-3003", "Acme", "Printer",
+                   "2024-03-01"),
+    ]}
+    result = collect_kev_items(devices, fetcher=lambda url: catalog)
+    assert result["status"] == "ok"
+    assert [i["label"] for i in result["items"]] == [
+        "KEV CVE-2024-3002", "KEV CVE-2024-3001"]
 
 
 def test_kev_collect_failure_and_empty():

@@ -5,3 +5,5 @@ LB-APP-01,F5,BIG-IP 4200,17.1.0
 FW-PERIM-01,Fortinet,FortiGate 100F,7.4.3
 SRV-WIN-01,Microsoft,Windows Server 2022,10.0.20348
 SRV-LNX-01,Red Hat,Rocky Linux 9,9.4
+NOKIA-7750-01,Nokia,Nokia 7750 SR-12,21.10.R1
+EXTREME-X450-01,Extreme,Extreme X450a-24x,12.4.4.10

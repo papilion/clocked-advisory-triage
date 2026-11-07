@@ -316,6 +316,9 @@ STRINGS = {
         "action_workarounds": "Workarounds / mitigations:",
         "action_verify_first": "Verify before deciding:",
         "action_none": "No action required.",
+        "per_device_verdicts_heading": "Per-device verdicts",
+        "col_affected_advisories": "Affected advisories",
+        "no_related_advisories": "No related advisories",
     },
     "ko": {
         "title": "네트워크 운영자를 위한 권고 판정",
@@ -538,6 +541,9 @@ STRINGS = {
         "action_workarounds": "임시 조치 / 완화책:",
         "action_verify_first": "판정 전에 확인할 것:",
         "action_none": "조치가 필요 없습니다.",
+        "per_device_verdicts_heading": "장비별 판정",
+        "col_affected_advisories": "해당 권고",
+        "no_related_advisories": "관련 권고 없음",
     },
 }  # type: Dict[str, Dict[str, Any]]
 
@@ -930,8 +936,15 @@ def _render_batch_mode(s, lang):
                 # type: (int, int, str) -> None
                 progress_bar.progress(
                     int(index * 100 / max(total, 1)))
+                # Per-item events fire BEFORE an item with a
+                # 0-based index (so +1 is the item being worked
+                # on); pipeline stage events report a completed
+                # count instead. Clamp the displayed count to the
+                # total so neither convention can render as
+                # "N+1 of N" at a stage boundary.
                 status_line.caption(
-                    s["batch_progress"] % (index + 1, total, label))
+                    s["batch_progress"] % (
+                        min(index + 1, total), total, label))
 
             try:
                 st.session_state["batch_results"] = runner(_progress)
@@ -1080,7 +1093,9 @@ def _render_batch_mode(s, lang):
 
     batch_results = st.session_state.get("batch_results")
     if batch_results is not None:
-        _render_batch_results(batch_results, s, lang)
+        _render_batch_results(
+            batch_results, s, lang,
+            devices=parse_inventory(devices_text))
 
 
 def _batch_advisory_label(item, lang):
@@ -1170,8 +1185,70 @@ def _action_one_liner(result, s, lang):
     return ""
 
 
-def _render_batch_results(results, s, lang):
-    # type: (List[Dict[str, Any]], Dict[str, Any], str) -> None
+def _device_verdict_summary(results, devices, lang):
+    # type: (List[Dict[str, Any]], List[Dict[str, str]], str) -> List[Dict[str, Any]]
+    """Aggregate batch results per inventory device, from the
+    rows already produced - no extra pipeline or API work.
+
+    Every parsed-inventory device is seeded in, so the fleet is
+    fully accounted for; hosts that appear only in result rows
+    are added with the row's model/version. Only CANDIDATE device
+    rows count as related to a device: a non-candidate row means
+    the advisory does not concern that device's product at all
+    (its NOT AFFECTED there is the matcher's "different product",
+    not a verdict about the device), so a device whose rows are
+    all non-candidate - or which never appears - has zero related
+    advisories. Returns entries {hostname, model, version,
+    affected: [labels], cannot: [labels], not_affected: int,
+    related: int} sorted affected-first, then CANNOT DETERMINE
+    count descending, then hostname."""
+    by_host = {}  # type: Dict[str, Dict[str, Any]]
+
+    def _entry(hostname, model, version):
+        # type: (str, str, str) -> Dict[str, Any]
+        entry = by_host.get(hostname)
+        if entry is None:
+            entry = {"hostname": hostname, "model": model,
+                     "version": version, "affected": [],
+                     "cannot": [], "not_affected": 0, "related": 0}
+            by_host[hostname] = entry
+        return entry
+
+    for device in devices or []:
+        _entry(str(device.get("hostname") or ""),
+               str(device.get("model") or ""),
+               str(device.get("version") or ""))
+    for item in results or []:
+        if item.get("status") != "ok":
+            continue
+        triage_result = item.get("triage") or {}
+        if triage_result.get("error"):
+            continue
+        label = _batch_advisory_label(item, lang)
+        for row in triage_result.get("device_results") or []:
+            if not row.get("candidate"):
+                continue
+            entry = _entry(str(row.get("hostname") or ""),
+                           str(row.get("model") or ""),
+                           str(row.get("version") or ""))
+            entry["related"] += 1
+            status = str(row.get("status") or "")
+            if status == "AFFECTED":
+                entry["affected"].append(label)
+            elif status == "CANNOT DETERMINE":
+                entry["cannot"].append(label)
+            elif status == "NOT AFFECTED":
+                entry["not_affected"] += 1
+    summary = [entry for entry in by_host.values()
+               if entry["hostname"]]
+    summary.sort(key=lambda e: (0 if e["affected"] else 1,
+                                -len(e["cannot"]),
+                                e["hostname"].lower()))
+    return summary
+
+
+def _render_batch_results(results, s, lang, devices=None):
+    # type: (List[Dict[str, Any]], Dict[str, Any], str, Optional[List[Dict[str, str]]]) -> None
     # Action summary first: only the advisories that need action,
     # AFFECTED before CANNOT DETERMINE, one line + link each.
     actionable = []  # type: List[Any]
@@ -1245,6 +1322,44 @@ def _render_batch_results(results, s, lang):
     if summary_rows:
         st.dataframe(summary_rows, use_container_width=True,
                      hide_index=True)
+
+    # Per-device verdicts: the same result rows re-aggregated by
+    # host, so the fleet reads as a checklist - every inventory
+    # device accounted for, affected advisories named inline and
+    # the cannot-determine ones listed per device below the
+    # table.
+    device_summary = _device_verdict_summary(
+        results, devices or [], lang)
+    if device_summary:
+        verdict_display = VERDICT_DISPLAY[lang]
+        st.subheader(s["per_device_verdicts_heading"])
+        device_rows = []  # type: List[Dict[str, Any]]
+        for entry in device_summary:
+            if entry["affected"]:
+                advisories = ", ".join(entry["affected"])
+            elif not entry["related"]:
+                advisories = s["no_related_advisories"]
+            else:
+                advisories = "-"
+            device_rows.append({
+                s["device_col"]: entry["hostname"],
+                s["model_col"]: entry["model"],
+                s["version_col"]: entry["version"],
+                verdict_display["AFFECTED"]: len(entry["affected"]),
+                verdict_display["CANNOT DETERMINE"]:
+                    len(entry["cannot"]),
+                verdict_display["NOT AFFECTED"]:
+                    entry["not_affected"],
+                s["col_affected_advisories"]: advisories,
+            })
+        st.dataframe(device_rows, use_container_width=True,
+                     hide_index=True)
+        for entry in device_summary:
+            if entry["cannot"]:
+                st.caption("%s - %s: %s" % (
+                    entry["hostname"],
+                    verdict_display["CANNOT DETERMINE"],
+                    ", ".join(entry["cannot"])))
 
     for idx, item in enumerate(results, start=1):
         triage_result = item.get("triage") or {}

@@ -599,7 +599,7 @@ NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 KEV_FEED_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
                 "known_exploited_vulnerabilities.json")
 NVD_RESULTS_PER_PAGE = 10
-NVD_QUERY_CAP = 4
+NVD_QUERY_CAP = 6
 FEED_ITEM_CAP = 15
 MAX_UPLOAD_FILES = 10
 
@@ -614,7 +614,7 @@ FEED_VENDOR_KEYWORDS = {
     "juniper": "Juniper Junos",
     "arista": "Arista EOS",
     "nokia": "Nokia SR OS",
-    "extreme": "ExtremeXOS",
+    "extreme": "Extreme EXOS",
 }
 
 # Display names used to build derived NVD queries for vendors
@@ -644,8 +644,10 @@ _VENDOR_MODEL_RES = (
     ("juniper", re.compile(r"juniper|junos|\bqfx|\bmx\d|\bex\d|\bsrx"
                            r"|\bacx|\bptx", re.IGNORECASE)),
     ("arista", re.compile(r"arista", re.IGNORECASE)),
-    ("nokia", re.compile(r"nokia", re.IGNORECASE)),
-    ("extreme", re.compile(r"extreme", re.IGNORECASE)),
+    ("nokia", re.compile(r"nokia|\b7750\b|\b7250\b|sr[\s-]?os"
+                         r"|\bsros\b", re.IGNORECASE)),
+    ("extreme", re.compile(r"extreme|extremexos|\bexos\b|summit"
+                           r"|\bx450|\bx650", re.IGNORECASE)),
     ("f5", re.compile(r"\bf5\b|big[\s-]?ip", re.IGNORECASE)),
     ("paloalto", re.compile(r"palo\s*alto|paloalto|pan[\s-]?os"
                             r"|\bpa-\d", re.IGNORECASE)),
@@ -1242,6 +1244,39 @@ JUDGE_ALL_CAP = 200
 # a deep-triage slot for the next one.
 TRACE_SCREEN_CAP = 80
 
+# Stage-progress labels for the feed pipeline, localized like
+# triage's display strings: the pipeline's `lang` picks the set
+# and every stage reports through the one progress(index, total,
+# label) callback the UI renders as a bar plus counts, so a
+# minutes-long run never sits on a static spinner text.
+PROGRESS_STRINGS = {
+    "en": {
+        "collecting_nvd": "Collecting NVD feeds - %d collected",
+        "collecting_kev": "Collecting KEV feed - %d matched",
+        "screening": "Screening against inventory",
+        "tracing": "Tracing vendor source - %s",
+    },
+    "ko": {
+        "collecting_nvd": "NVD 피드 수집 중 - 누적 %d건",
+        "collecting_kev": "KEV 피드 수집 중 - 누적 %d건",
+        "screening": "인벤토리 대조 스크리닝",
+        "tracing": "제조사 원문 추적 - %s",
+    },
+}
+
+
+def _emit_progress(progress, index, total, label):
+    # type: (Optional[Callable[[int, int, str], None]], int, int, str) -> None
+    """Fire one progress event, following the runners' habit: no
+    callback (or a stage whose total is 0) means no event, and a
+    misbehaving callback never breaks the run."""
+    if progress is None or total <= 0:
+        return
+    try:
+        progress(index, total, label)
+    except Exception:
+        pass
+
 
 def _nvd_windows(now, days=NVD_YEAR_DAYS):
     # type: (datetime.datetime, int) -> List[Tuple[datetime.datetime, datetime.datetime]]
@@ -1265,8 +1300,9 @@ def _nvd_ts(moment):
     return moment.strftime("%Y-%m-%dT%H:%M:%S.000")
 
 
-def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None):
-    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Dict[str, Any]
+def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
+                           progress=None, lang="en"):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[Callable[[int, int, str], None]], str) -> Dict[str, Any]
     """Collect a full year of NVD CVEs for the inventory vendors.
 
     Same query derivation as collect_nvd_items (at most
@@ -1282,6 +1318,13 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None):
     when given, is called before every HTTP request after the
     first - the live pipeline passes time.sleep; tests pass None.
     Returns collect_nvd_items' keys plus {"windows", "truncated"}.
+
+    `progress`, when given, is called once per completed
+    vendor-window as progress(windows_done, vendors x windows,
+    label) with the running unique-CVE count in the label - the
+    collection stage takes most of a feed run's wall time, so it
+    reports like every other stage instead of leaving the UI on
+    a static spinner.
     """
     fetch = fetcher or _fetch_json
     queries = _nvd_query_terms(devices)
@@ -1294,6 +1337,9 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None):
     moment = now or datetime.datetime.now(datetime.timezone.utc)
     windows = _nvd_windows(moment)
     result["windows"] = len(windows)
+    total_windows = len(queries) * len(windows)
+    windows_done = [0]
+    labels = PROGRESS_STRINGS[_normalize_lang(lang)]
     by_id = {}  # type: Dict[str, Tuple[Any, str]]
     errors = []  # type: List[str]
     requests_made = [0]
@@ -1353,6 +1399,9 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None):
                 elif len(vulns) < NVD_PAGE_SIZE or new_ids == 0:
                     break
                 start_index = fetched
+            windows_done[0] += 1
+            _emit_progress(progress, windows_done[0], total_windows,
+                           labels["collecting_nvd"] % len(by_id))
     items = []  # type: List[Dict[str, Any]]
     for vuln, term in by_id.values():
         item = _nvd_item(vuln, term)
@@ -1375,8 +1424,9 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None):
 
 
 def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
-                            kev_fetcher=None, sleep=None, now=None):
-    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Dict[str, Any]
+                            kev_fetcher=None, sleep=None, now=None,
+                            progress=None, lang="en"):
+    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[Callable[[int, int, str], None]], str) -> Dict[str, Any]
     """Collect a full year from both feeds and merge by CVE id.
 
     NVD items form the base; a KEV entry for the same CVE merges
@@ -1391,7 +1441,10 @@ def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
     dicts keep their status/count/reason (and NVD's
     windows/truncated, KEV's older_excluded) and "stats" carries
     the merge counts. With mock=True and no injected fetchers,
-    the bundled fixtures answer instead of the network."""
+    the bundled fixtures answer instead of the network.
+    `progress` is forwarded to the NVD collector (one event per
+    completed vendor-window) and fires once more when the KEV
+    fetch completes, at the same vendors x windows total."""
     if mock:
         if nvd_fetcher is None:
             nvd_fetcher = _fixture_nvd_fetcher
@@ -1399,11 +1452,18 @@ def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
             kev_fetcher = _fixture_kev_fetcher
     moment = now or datetime.datetime.now(datetime.timezone.utc)
     nvd = collect_nvd_items_year(devices, fetcher=nvd_fetcher,
-                                 sleep=sleep, now=moment)
+                                 sleep=sleep, now=moment,
+                                 progress=progress, lang=lang)
     kev_min_date = (moment - datetime.timedelta(
         days=NVD_YEAR_DAYS)).date()
     kev = collect_kev_items(devices, fetcher=kev_fetcher,
                             cap=KEV_YEAR_CAP, min_date=kev_min_date)
+    total_windows = len(nvd.get("queries") or []) \
+        * int(nvd.get("windows") or 0)
+    _emit_progress(
+        progress, total_windows, total_windows,
+        PROGRESS_STRINGS[_normalize_lang(lang)]["collecting_kev"]
+        % int(kev.get("count") or 0))
     items = []  # type: List[Dict[str, Any]]
     by_cve = {}  # type: Dict[str, Dict[str, Any]]
     for item in nvd["items"]:
@@ -1475,6 +1535,8 @@ _PRODUCT_KEY_DISPLAY = {
     "cisco nx-os": "Cisco NX-OS",
     "juniper junos": "Juniper Junos OS",
     "arista eos": "Arista EOS",
+    "nokia sr os": "Nokia SR OS",
+    "extreme exos": "Extreme EXOS",
     "f5 big-ip": "F5 BIG-IP",
     "palo alto pan-os": "Palo Alto PAN-OS",
     "fortinet fortios": "Fortinet FortiOS",
@@ -1497,6 +1559,8 @@ _TEXT_PRODUCT_PHRASES = [
     ("windows server", "microsoft windows"),
     ("windows", "microsoft windows"),
     ("esxi", "vmware esxi"), ("vsphere", "vmware esxi"),
+    ("sr os", "nokia sr os"), ("sros", "nokia sr os"),
+    ("extremexos", "extreme exos"), ("exos", "extreme exos"),
     ("eos", "arista eos"),
 ]
 
@@ -1542,6 +1606,10 @@ def _cpe_product_key(vendor, product):
         return "microsoft windows"
     if "esxi" in p or p == "vsphere":
         return "vmware esxi"
+    if "sr-os" in p or "sros" in p:
+        return "nokia sr os"
+    if p == "exos" or "extremexos" in p:
+        return "extreme exos"
     return None
 
 
@@ -1573,6 +1641,10 @@ def _device_product_keys(device):
         keys.add("juniper junos")
     if vendor == "arista" or re.search(r"\beos\b", lowered):
         keys.add("arista eos")
+    if vendor == "nokia" or "sr os" in lowered or "sros" in lowered:
+        keys.add("nokia sr os")
+    if vendor == "extreme" or "exos" in lowered:
+        keys.add("extreme exos")
     if "nexus" in lowered or "nx-os" in lowered:
         keys.add("cisco nx-os")
     if "ios xe" in lowered or "ios-xe" in lowered:
@@ -1999,8 +2071,13 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     "traced_for_screen" (candidates the trace-for-screen pass
     attempted), "rescreened_not_affected" and the budget actually
     used. In live mode (not mock, no injected fetchers) NVD
-    requests are spaced with time.sleep; `progress` is forwarded
-    to the deep-triage step.
+    requests are spaced with time.sleep. `progress`, when given,
+    reports EVERY stage through the one callback - collection
+    (per vendor-window, then the KEV fetch), the local screening
+    (a single event), the trace-for-screen pass (per attempted
+    candidate) and the deep triage (per item, via run_batch_items)
+    - so the UI's bar and counts move from the first seconds of
+    the run instead of only during the final stage.
     """
     if sleep is None and not mock and nvd_fetcher is None:
         sleep = time.sleep
@@ -2009,9 +2086,13 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
                         for device in devices]
     feed = collect_feed_items_year(
         devices, mock=mock, nvd_fetcher=nvd_fetcher,
-        kev_fetcher=kev_fetcher, sleep=sleep, now=now)
+        kev_fetcher=kev_fetcher, sleep=sleep, now=now,
+        progress=progress, lang=lang)
     local_rows, candidates, screen_stats = screen_feed_items(
         feed["items"], inventory_text, lang=lang)
+    _emit_progress(
+        progress, 1, 1,
+        PROGRESS_STRINGS[_normalize_lang(lang)]["screening"])
     budget = JUDGE_ALL_CAP if judge_all else FULL_TRIAGE_CAP
     hit_ids = set()  # type: Set[int]
     for item in candidates:
@@ -2022,7 +2103,7 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     traced_pool, trace_stats = trace_items(
         ordered[:TRACE_SCREEN_CAP], mock=mock,
         fetcher=trace_fetcher, json_fetcher=trace_json_fetcher,
-        cap=TRACE_SCREEN_CAP)
+        cap=TRACE_SCREEN_CAP, progress=progress, lang=lang)
     rows = list(local_rows)  # type: List[Dict[str, Any]]
     rescreened = 0
     survivors = []  # type: List[Dict[str, Any]]
@@ -2635,8 +2716,8 @@ def _fixture_trace_text_fetcher(url):
 
 
 def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
-                cap=TRACE_CAP):
-    # type: (List[Dict[str, Any]], bool, Optional[Callable[[str], str]], Optional[Callable[[str], Any]], int) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
+                cap=TRACE_CAP, progress=None, lang="en"):
+    # type: (List[Dict[str, Any]], bool, Optional[Callable[[str], str]], Optional[Callable[[str], Any]], int, Optional[Callable[[int, int, str], None]], str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
     """Trace feed items to their vendor originals (see the
     section header). At most `cap` items are traced, in the given
     order; items beyond the cap and items without a CVE id pass
@@ -2651,7 +2732,10 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
     With mock=True and no injected fetchers, bundled fixtures
     answer the fetches so the demo path works offline; `fetcher`
     fetches page text (JSA), `json_fetcher` fetches JSON
-    (CSAF / CNA records)."""
+    (CSAF / CNA records). `progress`, when given, fires once per
+    attempted item as progress(done, attempted_total, label)
+    with the item's CVE id in the label - attempted, not just
+    successful, so the count matches stats["attempted"]."""
     text_fetch = fetcher or fetch_advisory_text
     json_fetch = json_fetcher or _fetch_json
     if mock:
@@ -2661,8 +2745,12 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
             json_fetch = _fixture_trace_json_fetcher
     stats = {"traced": 0, "attempted": 0,
              "by_source": {}}  # type: Dict[str, Any]
+    items = list(items or [])
+    attempted_total = sum(
+        1 for item in items[:cap] if _item_cve_id(item or {}))
+    trace_labels = PROGRESS_STRINGS[_normalize_lang(lang)]
     traced_items = []  # type: List[Dict[str, Any]]
-    for index, item in enumerate(items or []):
+    for index, item in enumerate(items):
         new_item = dict(item or {})
         if index < cap and _item_cve_id(new_item):
             stats["attempted"] += 1
@@ -2685,6 +2773,10 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
                 by_source = stats["by_source"]
                 by_source[source_label] = by_source.get(
                     source_label, 0) + 1
+            _emit_progress(
+                progress, stats["attempted"], attempted_total,
+                trace_labels["tracing"]
+                % _item_cve_id(new_item))
         traced_items.append(new_item)
     return traced_items, stats
 

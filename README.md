@@ -122,7 +122,8 @@ copy-pasting:
      instead: the **NVD CVE API** (up to four keyword queries,
      vendors prioritized by device count in your inventory — the
      known network vendors use curated product keywords such as
-     "Cisco IOS XE", "Juniper Junos", "Arista EOS"; any other
+     "Cisco IOS XE", "Juniper Junos", "Arista EOS", "Nokia SR OS",
+     "Extreme EXOS"; any other
      fleet vendor present, from F5 to Microsoft, gets a derived
      "<Vendor> <top product token>" query — no API key needed) and
      CISA's **Known Exploited Vulnerabilities** catalog (filtered
@@ -366,9 +367,10 @@ two shapes real advisories take that a plain version list cannot:
 prose version bounds (Sample 6) and configuration conditions
 (Sample 7, the Arista 0201 pattern).
 
-Sample inventory (`samples/inventory_sample.txt`): 9 invented devices
+Sample inventory (`samples/inventory_sample.txt`): 11 invented devices
 (Catalyst 9300 ×3, Nexus 3064, QFX5110, Arista 7050 ×2, ASR1002-X,
-MX480), one per line as `hostname, model, OS version`. Replace it with
+MX480, Nokia 7750 SR-12, Extreme X450a-24x), one per line as
+`hostname, model, OS version`. Replace it with
 your own export in the same format for live runs.
 
 ## Mock Mode
