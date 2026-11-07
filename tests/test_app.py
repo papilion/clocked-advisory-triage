@@ -194,6 +194,27 @@ def test_demo_override_on_with_key_sample_run_is_mock():
     assert _demo_checkbox(at).value is True
 
 
+def test_demo_override_arbitrary_text_shows_demo_notice():
+    at = _fresh_app_with_key()
+    _demo_checkbox(at).set_value(True).run()
+    assert not at.exception
+    at.radio[0].set_value("paste").run()
+    assert not at.exception
+    at.text_area[0].set_value(
+        "Some random advisory with no sample marker and no "
+        "versions.").run()
+    assert not at.exception
+    _click_button(at, "Run Triage")
+    result = at.session_state["result"]
+    # Demo-override wording: a key IS configured, so the notice
+    # must not claim otherwise.
+    assert result["verdict"] is None
+    assert "Demo mode is on" in result["error"]
+    assert "no CLOCKED_API_KEY is configured" not in result["error"]
+    errors = [e.value or "" for e in at.error]
+    assert any("Demo mode is on" in e for e in errors), errors
+
+
 def test_feeds_under_override_with_key_uses_fixtures():
     at = _fresh_app_with_key()
     _demo_checkbox(at).set_value(True).run()

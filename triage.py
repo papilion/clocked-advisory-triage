@@ -158,6 +158,14 @@ WARNING_STRINGS = {
     },
 }
 
+# Notice returned when Mock Mode cannot judge arbitrary text
+# (no bundled sample matched). Two contexts, two wordings:
+# MOCK_ERROR_STRINGS is the no-key case - Mock Mode is the only
+# mode available, so the notice points at setting a key.
+# MOCK_DEMO_ERROR_STRINGS is the Demo-override case - a key IS
+# configured and the user turned Demo mode on on purpose, so
+# claiming "no key is configured" would be false; the notice
+# points at turning Demo mode off instead.
 MOCK_ERROR_STRINGS = {
     "en": (
         "Mock Mode: no CLOCKED_API_KEY is configured, so live "
@@ -170,6 +178,19 @@ MOCK_ERROR_STRINGS = {
         "분석을 사용할 수 없습니다. 데모는 포함된 샘플을 사용하거나, "
         "임의의 텍스트를 실시간으로 분석하려면 CLOCKED_API_KEY를 "
         "설정하세요."
+    ),
+}
+
+MOCK_DEMO_ERROR_STRINGS = {
+    "en": (
+        "Demo mode is on: canned responses cover only the seven "
+        "bundled samples. Turn Demo mode off to run live analysis "
+        "of arbitrary text."
+    ),
+    "ko": (
+        "데모 모드가 켜져 있습니다: 고정 응답은 번들로 제공되는 "
+        "7개 샘플에만 적용됩니다. 임의의 텍스트를 실시간으로 "
+        "분석하려면 데모 모드를 끄세요."
     ),
 }
 
@@ -1776,8 +1797,12 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
 
     `mock=True` forces Mock Mode (canned responses for the bundled
     samples) even when an API key is configured - the app's Demo
-    override threads through here, so no key is resolved and no
-    Clocked call is made.
+    override threads through here, so no Clocked call is made.
+    When Mock Mode then cannot judge arbitrary text, the notice
+    wording follows the context: Demo-override wording when a key
+    is configured (resolving the key string here only picks the
+    wording - it is never used for a call in Mock Mode), no-key
+    wording otherwise.
     """
     lang = _normalize_lang(lang)
     devices = parse_inventory(inventory_text)
@@ -1787,9 +1812,15 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
     if mode == "mock":
         detected = detect_sample_id(advisory_text, sample_id)
         if detected is None:
+            # The app passes mock=True both for "no key, Mock is
+            # the only mode" and for "key configured, Demo override
+            # on"; only the latter may use the Demo wording.
+            demo_override = mock and bool(_get_api_key(api_key))
+            notice_strings = (MOCK_DEMO_ERROR_STRINGS if demo_override
+                              else MOCK_ERROR_STRINGS)
             return {
                 "mode": mode,
-                "error": MOCK_ERROR_STRINGS[lang],
+                "error": notice_strings[lang],
                 "verdict": None,
                 "devices": devices,
             }

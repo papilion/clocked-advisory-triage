@@ -726,6 +726,72 @@ def test_mock_arbitrary_text_ko_error_notice():
     assert "CLOCKED_API_KEY" in result["error"]
 
 
+def test_mock_arbitrary_text_en_error_notice_no_key(monkeypatch):
+    # No key and no override: the notice must keep the no-key
+    # wording (live analysis needs CLOCKED_API_KEY).
+    monkeypatch.delenv("CLOCKED_API_KEY", raising=False)
+    result = run_triage(
+        "Some random advisory with no sample marker and no versions.",
+        "SW-01, Catalyst 9300, 17.9.4\n",
+        sample_id=None,
+        api_key=None,
+        lang="en",
+    )
+    assert result["verdict"] is None
+    assert "no CLOCKED_API_KEY is configured" in result["error"]
+    assert "Demo mode is on" not in result["error"]
+
+
+def test_mock_override_arbitrary_text_demo_notice_en(monkeypatch):
+    # Key configured + Demo override on (mock=True): the notice
+    # must NOT claim no key is configured - it says Demo mode is
+    # on and how to get live analysis back.
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    result = run_triage(
+        "Some random advisory with no sample marker and no versions.",
+        "SW-01, Catalyst 9300, 17.9.4\n",
+        sample_id=None,
+        mock=True,
+        lang="en",
+    )
+    assert result["mode"] == "mock"
+    assert result["verdict"] is None
+    assert "Demo mode is on" in result["error"]
+    assert "no CLOCKED_API_KEY is configured" not in result["error"]
+
+
+def test_mock_override_arbitrary_text_demo_notice_ko(monkeypatch):
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    result = run_triage(
+        "Some random advisory with no sample marker and no versions.",
+        "SW-01, Catalyst 9300, 17.9.4\n",
+        sample_id=None,
+        mock=True,
+        lang="ko",
+    )
+    assert result["verdict"] is None
+    assert _has_hangul(result["error"])
+    assert "데모 모드가 켜져 있습니다" in result["error"]
+    assert "CLOCKED_API_KEY가 설정되지 않아" not in result["error"]
+
+
+def test_mock_forced_without_key_keeps_no_key_notice(monkeypatch):
+    # mock=True with NO key configured is the app's no-key state
+    # (Demo is the only mode), not a deliberate override: the
+    # no-key wording still applies.
+    monkeypatch.delenv("CLOCKED_API_KEY", raising=False)
+    result = run_triage(
+        "Some random advisory with no sample marker and no versions.",
+        "SW-01, Catalyst 9300, 17.9.4\n",
+        sample_id=None,
+        api_key=None,
+        mock=True,
+        lang="en",
+    )
+    assert result["verdict"] is None
+    assert "no CLOCKED_API_KEY is configured" in result["error"]
+
+
 # ---------------- feature A: narrative version constraints ---------
 
 def test_parse_version_constraint_forms():

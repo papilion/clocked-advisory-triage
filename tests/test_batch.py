@@ -423,6 +423,31 @@ def test_run_batch_mock_override_beats_configured_key(monkeypatch):
     assert results[0]["triage"]["verdict"] == "AFFECTED"
 
 
+def test_run_batch_items_mock_override_arbitrary_text_demo_notice(
+        monkeypatch):
+    # Batch under the Demo override: a non-sample item cannot be
+    # judged from canned responses, and its notice must use the
+    # Demo-override wording (a key IS configured) - in both
+    # languages - not the no-key wording.
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    items = [{"label": "RANDOM-1", "url": "",
+              "text": "Some random advisory with no sample marker "
+                      "and no versions."}]
+    results = run_batch_items(
+        items, _sample_text("inventory_sample.txt"), mock=True)
+    assert results[0]["status"] == "ok"
+    error = results[0]["triage"]["error"]
+    assert "Demo mode is on" in error
+    assert "no CLOCKED_API_KEY is configured" not in error
+
+    results_ko = run_batch_items(
+        items, _sample_text("inventory_sample.txt"), mock=True,
+        lang="ko")
+    error_ko = results_ko[0]["triage"]["error"]
+    assert "데모 모드가 켜져 있습니다" in error_ko
+    assert "CLOCKED_API_KEY가 설정되지 않아" not in error_ko
+
+
 # ------------------------- batch UI (AppTest) ------------------------
 
 from streamlit.testing.v1 import AppTest  # noqa: E402

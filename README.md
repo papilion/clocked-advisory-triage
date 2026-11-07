@@ -19,6 +19,8 @@ guessing "not affected".
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/papilion/clocked-advisory-triage)
 
+**Live demo:** [advisory-triage.streamlit.app](https://advisory-triage.streamlit.app/)
+
 ## Languages
 
 The UI is available in **English and Korean (한국어)** via the
@@ -29,8 +31,8 @@ verdict claim sent to Clocked Verify stays in English.
 
 ## Demo
 
-- Live demo: TBD (link to be added after deployment)
-- Demo video: TBD (link to be added)
+- Live demo: [advisory-triage.streamlit.app](https://advisory-triage.streamlit.app/)
+- Demo video: TBD (video coming soon)
 - No key? The app runs in **Mock Mode** with seven bundled synthetic
   samples — see below. No sign-up needed to try the demo path.
 

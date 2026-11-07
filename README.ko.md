@@ -19,6 +19,8 @@ English: [README.md](README.md)
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/papilion/clocked-advisory-triage)
 
+**라이브 데모:** [advisory-triage.streamlit.app](https://advisory-triage.streamlit.app/)
+
 ## 언어
 
 UI는 상단의 언어 토글로 **영어와 한국어**를 지원하며, 기본값은
@@ -29,8 +31,8 @@ UI는 상단의 언어 토글로 **영어와 한국어**를 지원하며, 기본
 
 ## 데모
 
-- 라이브 데모: TBD (배포 후 링크 추가 예정)
-- 데모 영상: TBD (링크 추가 예정)
+- 라이브 데모: [advisory-triage.streamlit.app](https://advisory-triage.streamlit.app/)
+- 데모 영상: TBD (영상 준비 중, 추후 추가 예정)
 - 키가 없어도 앱은 번들로 제공되는 7개의 합성 샘플로 **모의
   모드(Mock Mode)** 로 실행됩니다 — 아래를 참고하세요. 가입 없이도
   데모 경로를 사용해 볼 수 있습니다.
