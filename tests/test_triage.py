@@ -10,6 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest  # noqa: E402
+
 import triage  # noqa: E402
 from triage import (  # noqa: E402
     VERDICT_AFFECTED,
@@ -22,6 +24,7 @@ from triage import (  # noqa: E402
     constraint_matches,
     derive_version_constraints,
     generate_checklist,
+    is_credit_error,
     load_mock_responses,
     match_device,
     normalize_extraction,
@@ -234,6 +237,21 @@ def test_mock_sample1_affected():
     assert result["verdict"] == VERDICT_AFFECTED
     assert result["urgency"] == "immediate"
     assert result["clocked_calls"] == 4
+
+
+def test_mock_override_beats_configured_key(monkeypatch):
+    # The app's Demo override: mock=True must win over a configured
+    # key - no key resolution, no Clocked call, canned verdict.
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    root = Path(__file__).resolve().parent.parent
+    advisory = (root / "samples" / "sample1_affected.txt").read_text(
+        encoding="utf-8")
+    inventory = (root / "samples" / "inventory_sample.txt").read_text(
+        encoding="utf-8")
+    result = run_triage(advisory, inventory, sample_id="sample1",
+                        mock=True)
+    assert result["mode"] == "mock"
+    assert result["verdict"] == VERDICT_AFFECTED
 
 
 def test_mock_sample2_not_affected():
@@ -1295,3 +1313,92 @@ def test_matcher_prose_entry_never_decides_not_affected():
         result = match_device(
             device(model="MX480", version=version), extracted)
         assert result["status"] == VERDICT_CANNOT
+
+
+# --------------------- credit exhaustion -----------------------
+# The hackathon credit balance can run out mid-run; the SDK then
+# raises InsufficientCreditsError (HTTP 402) on every call. Live
+# runs must translate that into a flagged, verdict-less result
+# and stop calling, instead of failing obscurely per stage.
+
+class InsufficientCreditsError(Exception):
+    """Duck-typed stand-in for the SDK's credit error: detection
+    keys on the class name / message, never on an SDK import."""
+
+
+CREDIT_MESSAGE = ("Clocked API 402: Your credit allowance or "
+                  "spending limit has been reached.")
+
+
+def test_is_credit_error_by_class_name_and_message():
+    assert is_credit_error(InsufficientCreditsError("402"))
+    assert is_credit_error(Exception(CREDIT_MESSAGE))
+    assert is_credit_error(Exception("SPENDING LIMIT reached"))
+    assert not is_credit_error(Exception("boom"))
+    assert not is_credit_error(ValueError("rate limit exceeded"))
+    assert not is_credit_error(Exception("insufficient funds"))
+
+
+class _CreditStubClient(object):
+    """Live-client stub that raises the credit error at one
+    chosen stage and records every call it receives."""
+
+    def __init__(self, fail_on):
+        self.calls = []
+        self.fail_on = fail_on
+
+    def extract(self, **kwargs):
+        self.calls.append("extract")
+        if self.fail_on == "extract":
+            raise InsufficientCreditsError(CREDIT_MESSAGE)
+        return {"fields": {}}
+
+    def decide(self, **kwargs):
+        self.calls.append("decide")
+        if self.fail_on == "decide":
+            raise InsufficientCreditsError(CREDIT_MESSAGE)
+        return {"answers": {}}
+
+    def grounding(self, **kwargs):
+        self.calls.append("grounding")
+        return {"verdict": "grounded", "grounded": 0.9,
+                "ungrounded": 0.1, "answers_question": 0.9}
+
+
+def test_live_credit_error_on_first_call_stops_the_run(monkeypatch):
+    stub = _CreditStubClient("extract")
+    monkeypatch.setattr(triage, "_make_client",
+                        lambda api_key: stub)
+    result = run_triage("some advisory", "SW-01, Catalyst 9300, 17.9.4",
+                        api_key="test-key")
+    assert result["credit_exhausted"] is True
+    assert result["mode"] == "live"
+    assert result["verdict"] is None
+    assert "402" in result["error"]
+    # Exactly one Clocked call happened: no retries, no later
+    # stages.
+    assert stub.calls == ["extract"]
+
+
+def test_live_credit_error_at_decide_stops_before_grounding(monkeypatch):
+    stub = _CreditStubClient("decide")
+    monkeypatch.setattr(triage, "_make_client",
+                        lambda api_key: stub)
+    result = run_triage("some advisory", "SW-01, Catalyst 9300, 17.9.4",
+                        api_key="test-key")
+    assert result["credit_exhausted"] is True
+    assert result["verdict"] is None
+    # Main + focused extract went through; grounding never ran.
+    assert stub.calls == ["extract", "extract", "decide"]
+
+
+def test_live_non_credit_error_still_raises(monkeypatch):
+    class _BoomClient(object):
+        def extract(self, **kwargs):
+            raise ValueError("boom")
+
+    monkeypatch.setattr(triage, "_make_client",
+                        lambda api_key: _BoomClient())
+    with pytest.raises(ValueError):
+        run_triage("some advisory", "SW-01, Catalyst 9300, 17.9.4",
+                   api_key="test-key")

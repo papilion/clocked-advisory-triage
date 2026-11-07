@@ -36,8 +36,8 @@ from triage import (GENERIC_PRODUCT_WORDS, REASON_STRINGS,
                     VERDICT_AFFECTED, VERDICT_CANNOT,
                     VERDICT_NOT_AFFECTED, _compare_versions,
                     _normalize_lang, _product_core, _row, build_claim,
-                    generate_checklist, parse_inventory, product_matches,
-                    run_triage, version_matches)
+                    generate_checklist, is_credit_error, parse_inventory,
+                    product_matches, run_triage, version_matches)
 
 MAX_LINKS = 10
 HARVEST_CAP = 15
@@ -1278,6 +1278,39 @@ def _emit_progress(progress, index, total, label):
         pass
 
 
+# Message carried by batch entries that were never judged because
+# the run's Clocked credits ran out (see _credit_entry). Localized
+# like the runners' other display text; the verdict constants are
+# never involved - a credit entry is an error row, not a judgment.
+CREDIT_STRINGS = {
+    "en": "Not judged - Clocked API credits exhausted.",
+    "ko": "판정되지 않음 - Clocked API 크레딧이 소진되었습니다.",
+}
+
+
+def _credit_entry(base, lang, text=""):
+    # type: (Dict[str, Any], str, str) -> Dict[str, Any]
+    """The entry for an item that was never judged because the
+    run's Clocked credits are exhausted: the runners' standard
+    error-row shape (status "error" + message), so it cannot be
+    mistaken for a verdict, with a localized message saying why
+    and the "credit_exhausted" flag the UI banner and the feed
+    stats key on. `text`, when given, also fills text_hint the
+    same way _judge_entry does."""
+    entry = dict(base)
+    if text:
+        hint = ""
+        for line in text.splitlines():
+            if line.strip():
+                hint = line.strip()[:80]
+                break
+        entry["text_hint"] = hint
+    entry["status"] = "error"
+    entry["error"] = CREDIT_STRINGS[_normalize_lang(lang)]
+    entry["credit_exhausted"] = True
+    return entry
+
+
 def _nvd_windows(now, days=NVD_YEAR_DAYS):
     # type: (datetime.datetime, int) -> List[Tuple[datetime.datetime, datetime.datetime]]
     """Consecutive [start, end] publication windows covering the
@@ -2058,8 +2091,13 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     every related fleet device clears, the candidate becomes a
     local NOT AFFECTED row (vendor source label kept) and spends
     NO deep-triage budget -> deep-triage the surviving candidates
-    with run_batch_items. Most fresh CVEs carry no NVD ranges at
-    all, so the trace is what makes the screen effective. The
+    with run_batch_items. `mock=True` covers the WHOLE pipeline:
+    the bundled fixtures answer collection and tracing, and the
+    deep triage itself is judged in Mock Mode (run_batch_items
+    receives mock too), so a mock run makes no network or Clocked
+    calls even when an API key is configured. Most fresh CVEs
+    carry no NVD ranges at all, so the trace is what makes the
+    screen effective. The
     deep-triage budget is FULL_TRIAGE_CAP, or JUDGE_ALL_CAP when
     judge_all is set; candidates beyond it become local CANNOT
     DETERMINE rows that say so plainly. Returns (rows, stats):
@@ -2070,7 +2108,10 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     includes the re-screened clears), the trace outcome,
     "traced_for_screen" (candidates the trace-for-screen pass
     attempted), "rescreened_not_affected" and the budget actually
-    used. In live mode (not mock, no injected fetchers) NVD
+    used. stats["credit_exhausted"] reports whether the deep
+    triage hit Clocked credit exhaustion (its entries then carry
+    the flag too; the local screening rows are unaffected). In
+    live mode (not mock, no injected fetchers) NVD
     requests are spaced with time.sleep. `progress`, when given,
     reports EVERY stage through the one callback - collection
     (per vendor-window, then the KEV fetch), the local screening
@@ -2128,7 +2169,14 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     over_items = survivors[budget:]
     entries = run_batch_items(
         judged_items, inventory_text, api_key=api_key, lang=lang,
-        progress=progress, prefilter=False)
+        progress=progress, prefilter=False, mock=mock)
+    # Run-level credit state for the UI banner: run_batch_items
+    # fails fast on the first 402, so any credit entry among the
+    # deep-triage results means the run's Clocked calls died part
+    # way (local rows above and below are unaffected - they never
+    # spend calls).
+    credit_exhausted = any(
+        bool(entry.get("credit_exhausted")) for entry in entries)
     for item, entry in zip(judged_items, entries):
         entry["kev"] = bool((item or {}).get("kev"))
         entry["published"] = str((item or {}).get("published") or "")
@@ -2151,7 +2199,8 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
              "rescreened_not_affected": rescreened,
              "deep_triaged": len(judged_items),
              "budget": budget,
-             "candidates": len(candidates)}
+             "candidates": len(candidates),
+             "credit_exhausted": credit_exhausted}
     return rows, stats
 
 
@@ -2785,12 +2834,14 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
 # Batch runner
 # ---------------------------------------------------------------------------
 
-def _judge_entry(base, text, devices_text, api_key, lang, relevance):
-    # type: (Dict[str, Any], str, str, Optional[str], str, Optional[Any]) -> Dict[str, Any]
+def _judge_entry(base, text, devices_text, api_key, lang, relevance,
+                 mock=False):
+    # type: (Dict[str, Any], str, str, Optional[str], str, Optional[Any], bool) -> Dict[str, Any]
     """Judge one already-available advisory text: relevance
     prefilter first (no Clocked calls on a miss), then run_triage.
     `base` carries the entry's identity keys (url, and label for
-    pre-fetched items)."""
+    pre-fetched items). `mock=True` forces Mock Mode judging in
+    run_triage regardless of any configured API key."""
     entry = dict(base)
     hint = ""
     for line in (text or "").splitlines():
@@ -2804,11 +2855,19 @@ def _judge_entry(base, text, devices_text, api_key, lang, relevance):
         return entry
     try:
         triage_result = run_triage(text, devices_text,
-                                   api_key=api_key, lang=lang)
+                                   api_key=api_key, lang=lang,
+                                   mock=mock)
     except Exception as exc:
+        if is_credit_error(exc):
+            return _credit_entry(entry, lang)
         entry["status"] = "error"
         entry["error"] = str(exc) or exc.__class__.__name__
         return entry
+    if triage_result.get("credit_exhausted"):
+        # run_triage translated a 402 into a verdict-less result;
+        # at batch level that is an error row, not an "ok" entry
+        # with no verdict - and the runners fail fast on the flag.
+        return _credit_entry(entry, lang)
     entry["status"] = "ok"
     entry["triage"] = triage_result
     return entry
@@ -2824,8 +2883,8 @@ def _prefilter_pattern(prefilter, devices_text):
 
 def run_batch(links, devices_text, api_key=None, lang="en",
               fetcher=fetch_advisory_text, progress=None,
-              prefilter=False):
-    # type: (List[str], str, Optional[str], str, Callable[[str], str], Optional[Callable[[int, int, str], None]], bool) -> List[Dict[str, Any]]
+              prefilter=False, mock=False):
+    # type: (List[str], str, Optional[str], str, Callable[[str], str], Optional[Callable[[int, int, str], None]], bool, bool) -> List[Dict[str, Any]]
     """Fetch and triage every link against one inventory.
 
     Each link is independent: a fetch failure (or a triage error)
@@ -2840,16 +2899,29 @@ def run_batch(links, devices_text, api_key=None, lang="en",
     with skip_reason "not_relevant" and NO Clocked calls are spent
     on it. `progress`, when given, is called as
     progress(index, total, url) before each link is processed.
+
+    Credit exhaustion fails the run fast: once one entry comes
+    back credit_exhausted, no further Clocked calls are made and
+    every remaining link gets a credit entry (see _credit_entry)
+    instead of a judgment; entries already judged keep theirs.
+
+    `mock=True` forces Mock Mode judging for every link (the
+    app's Demo override), regardless of any configured API key;
+    fetching still uses `fetcher` as usual.
     """
     relevance = _prefilter_pattern(prefilter, devices_text)
     results = []  # type: List[Dict[str, Any]]
     total = len(links)
+    credit_dead = False
     for index, url in enumerate(links):
         if progress is not None:
             try:
                 progress(index, total, url)
             except Exception:
                 pass
+        if credit_dead:
+            results.append(_credit_entry({"url": url}, lang))
+            continue
         try:
             text = fetcher(url)
         except Exception as exc:
@@ -2859,23 +2931,33 @@ def run_batch(links, devices_text, api_key=None, lang="en",
                 "error": str(exc) or exc.__class__.__name__,
             })
             continue
-        results.append(_judge_entry({"url": url}, text, devices_text,
-                                     api_key, lang, relevance))
+        entry = _judge_entry({"url": url}, text, devices_text,
+                             api_key, lang, relevance, mock=mock)
+        if entry.get("credit_exhausted"):
+            credit_dead = True
+        results.append(entry)
     return results
 
 
 def run_batch_items(items, devices_text, api_key=None, lang="en",
-                    progress=None, prefilter=False):
-    # type: (List[Dict[str, Any]], str, Optional[str], str, Optional[Callable[[int, int, str], None]], bool) -> List[Dict[str, Any]]
+                    progress=None, prefilter=False, mock=False):
+    # type: (List[Dict[str, Any]], str, Optional[str], str, Optional[Callable[[int, int, str], None]], bool, bool) -> List[Dict[str, Any]]
     """Triage pre-fetched items ({"label", "url", "text"} dicts,
     as produced by the feed collectors and the upload converter)
     against one inventory - the same judging path as run_batch,
     minus the fetching. Entries additionally carry the item's
     "label". `progress`, when given, is called as
-    progress(index, total, label) before each item is processed."""
+    progress(index, total, label) before each item is processed.
+
+    Credit exhaustion fails the run fast, exactly as in run_batch:
+    after the first credit entry, remaining items get credit
+    entries without any further Clocked calls. `mock=True` forces
+    Mock Mode judging for every item (the app's Demo override),
+    regardless of any configured API key."""
     relevance = _prefilter_pattern(prefilter, devices_text)
     results = []  # type: List[Dict[str, Any]]
     total = len(items)
+    credit_dead = False
     for index, item in enumerate(items):
         label = str((item or {}).get("label") or "")
         url = str((item or {}).get("url") or "")
@@ -2891,7 +2973,15 @@ def run_batch_items(items, devices_text, api_key=None, lang="en",
             base["source_label"] = str(item["source_label"])
         if (item or {}).get("source_url"):
             base["source_url"] = str(item["source_url"])
-        results.append(_judge_entry(
+        if credit_dead:
+            results.append(_credit_entry(
+                base, lang,
+                text=str((item or {}).get("text") or "")))
+            continue
+        entry = _judge_entry(
             base, str((item or {}).get("text") or ""), devices_text,
-            api_key, lang, relevance))
+            api_key, lang, relevance, mock=mock)
+        if entry.get("credit_exhausted"):
+            credit_dead = True
+        results.append(entry)
     return results

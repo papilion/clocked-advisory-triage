@@ -1476,6 +1476,27 @@ def _make_client(api_key):
             return Clocked(api_key=api_key)
 
 
+def is_credit_error(exc):
+    # type: (BaseException) -> bool
+    """True when a live-call failure is Clocked credit exhaustion
+    (HTTP 402: the account's credit allowance / spending limit has
+    been reached), as opposed to a transient or per-request error.
+
+    Duck-typed on purpose - this module never imports the SDK
+    outside _make_client: the SDK exception's class name carries
+    "InsufficientCredits", and its message (like any HTTP-level
+    rendering of the same 402) names the "credit allowance" or
+    the "spending limit". Credit exhaustion is terminal for the
+    whole run - every later call would fail the same way - so
+    callers fail fast on it instead of retrying per item.
+    """
+    if "InsufficientCredits" in exc.__class__.__name__:
+        return True
+    message = str(exc).lower()
+    return "credit allowance" in message or \
+        "spending limit" in message
+
+
 # The applicability_conditions field definition is shared verbatim
 # by the main extract call and the focused conditions-only call:
 # identical description text, so both passes ask for the same thing.
@@ -1661,19 +1682,83 @@ def _live_grounding(client, advisory_text, inventory_text, claim):
 # Orchestration
 # --------------------------------------------------------------------------
 
+def _live_result(key, advisory_text, inventory_text, devices, lang):
+    # type: (str, str, str, List[Dict[str, str]], str) -> Dict[str, Any]
+    """The Live Mode pipeline: Extract -> local matcher -> Decide
+    -> Verify (grounding), composed into the result dict. Any
+    exception from a Clocked call propagates to run_triage, which
+    owns the credit-exhaustion translation."""
+    client = _make_client(key)
+    extracted, extract_raw_fields = _live_extract(client, advisory_text)
+    extracted = normalize_extraction(extracted, extract_raw_fields)
+    # Matcher runs between extract and decide in live mode too.
+    # The copy fed to Decide (and used for the grounding claim)
+    # is always English, so API inputs never depend on `lang`;
+    # a second, localized copy is produced for display only.
+    # Matching is local and deterministic, so this costs no
+    # Clocked calls and both copies always agree on status.
+    device_results_live = match_inventory(devices, extracted)
+    decide_result = _live_decide(client, advisory_text, extracted,
+                                 device_results_live)
+    decide_parsed_live = parse_decide(decide_result)
+    preliminary = base_verdict(device_results_live)
+    claim_live = build_claim(preliminary, device_results_live, extracted)
+    grounding_result = _live_grounding(
+        client, advisory_text, inventory_text, claim_live)
+    if lang == "en":
+        device_results = device_results_live
+    else:
+        device_results = match_inventory(devices, extracted, lang=lang)
+    decide_parsed = decide_parsed_live
+    grounding_parsed = parse_grounding(grounding_result)
+    condition_texts = [c["text"]
+                       for c in extracted.get("conditions") or []]
+    composed = compose_verdict(device_results, decide_parsed,
+                               grounding_parsed, lang=lang,
+                               conditions=condition_texts)
+    final_verdict = composed["verdict"]
+    claim = build_claim(final_verdict, device_results, extracted)
+    return {
+        "mode": "live",
+        "sample_id": None,
+        "extracted": extracted,
+        "extract_raw": {"fields": extract_raw_fields},
+        "decide_raw": decide_result,
+        "decide": decide_parsed,
+        "grounding_raw": grounding_result,
+        "grounding": grounding_parsed,
+        "device_results": device_results,
+        "verdict": final_verdict,
+        "urgency": composed["urgency"],
+        "warnings": composed["warnings"],
+        "conditions": condition_texts,
+        "claim": claim,
+        "checklist": generate_checklist(final_verdict,
+                                        composed["urgency"],
+                                        lang=lang,
+                                        conditions=condition_texts),
+        "clocked_calls": 4,
+    }
+
+
 def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
-               lang="en"):
-    # type: (str, str, Optional[str], Optional[str], str) -> Dict[str, Any]
+               lang="en", mock=False):
+    # type: (str, str, Optional[str], Optional[str], str, bool) -> Dict[str, Any]
     """Run the full pipeline. Returns a result dict for the UI / tests.
 
     `lang` ("en" default, or "ko") localizes display text only:
     per-device reasons, warnings, the checklist, and the Mock Mode
     notice. Verdict constants, the grounding claim, and every Clocked
     prompt stay English.
+
+    `mock=True` forces Mock Mode (canned responses for the bundled
+    samples) even when an API key is configured - the app's Demo
+    override threads through here, so no key is resolved and no
+    Clocked call is made.
     """
     lang = _normalize_lang(lang)
     devices = parse_inventory(inventory_text)
-    key = _get_api_key(api_key)
+    key = None if mock else _get_api_key(api_key)
     mode = "live" if key else "mock"
 
     if mode == "mock":
@@ -1695,61 +1780,24 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
         grounding_result = canned.get("grounding") or {}
         used_sample = detected
     else:
-        client = _make_client(str(key))
-        extracted, extract_raw_fields = _live_extract(client, advisory_text)
-        extracted = normalize_extraction(extracted, extract_raw_fields)
-        decide_result = {}
-        grounding_result = {}
-        used_sample = None
-        # Matcher runs between extract and decide in live mode too.
-        # The copy fed to Decide (and used for the grounding claim)
-        # is always English, so API inputs never depend on `lang`;
-        # a second, localized copy is produced for display only.
-        # Matching is local and deterministic, so this costs no
-        # Clocked calls and both copies always agree on status.
-        device_results_live = match_inventory(devices, extracted)
-        decide_result = _live_decide(client, advisory_text, extracted,
-                                     device_results_live)
-        decide_parsed_live = parse_decide(decide_result)
-        preliminary = base_verdict(device_results_live)
-        claim_live = build_claim(preliminary, device_results_live, extracted)
-        grounding_result = _live_grounding(
-            client, advisory_text, inventory_text, claim_live)
-        # Reuse the shared composition path below.
-        if lang == "en":
-            device_results = device_results_live
-        else:
-            device_results = match_inventory(devices, extracted, lang=lang)
-        decide_parsed = decide_parsed_live
-        grounding_parsed = parse_grounding(grounding_result)
-        condition_texts = [c["text"]
-                           for c in extracted.get("conditions") or []]
-        composed = compose_verdict(device_results, decide_parsed,
-                                   grounding_parsed, lang=lang,
-                                   conditions=condition_texts)
-        final_verdict = composed["verdict"]
-        claim = build_claim(final_verdict, device_results, extracted)
-        return {
-            "mode": mode,
-            "sample_id": used_sample,
-            "extracted": extracted,
-            "extract_raw": {"fields": extract_raw_fields},
-            "decide_raw": decide_result,
-            "decide": decide_parsed,
-            "grounding_raw": grounding_result,
-            "grounding": grounding_parsed,
-            "device_results": device_results,
-            "verdict": final_verdict,
-            "urgency": composed["urgency"],
-            "warnings": composed["warnings"],
-            "conditions": condition_texts,
-            "claim": claim,
-            "checklist": generate_checklist(final_verdict,
-                                            composed["urgency"],
-                                            lang=lang,
-                                            conditions=condition_texts),
-            "clocked_calls": 4,
-        }
+        try:
+            return _live_result(str(key), advisory_text, inventory_text,
+                                devices, lang)
+        except Exception as exc:
+            if not is_credit_error(exc):
+                raise
+            # Credit exhaustion is terminal for the run: the
+            # exception already stopped the call sequence, and the
+            # result carries the flag (plus the raw error detail)
+            # instead of a verdict, so the UI can banner it and
+            # batch runners can fail fast without further calls.
+            return {
+                "mode": mode,
+                "credit_exhausted": True,
+                "error": str(exc) or exc.__class__.__name__,
+                "verdict": None,
+                "devices": devices,
+            }
 
     # Mock path composition (shared logic with live path).
     device_results = match_inventory(devices, extracted, lang=lang)

@@ -547,6 +547,80 @@ def test_pipeline_judge_all_lifts_budget():
     assert all(r.get("basis") != "local-screen" for r in rows)
 
 
+def test_pipeline_credit_exhaustion_sets_stats_flag(monkeypatch):
+    # Deep triage dies on Clocked credits: the surviving
+    # candidate becomes a credit entry (never a verdict), the
+    # run-level stats flag is set, and the local screening row
+    # is produced exactly as before (it never spends calls).
+    devices_text = ("SW-01, Catalyst 9300, 17.6.5\n"
+                    "RTR-01, MX480, 21.3R3\n")
+    hit = _vuln("CVE-2026-6001", "2026-05-01T00:00:00.000",
+                "Cisco IOS XE flaw.", score=9.8, severity="CRITICAL",
+                configurations=_configs(
+                    "ios_xe", versionStartIncluding="17.6",
+                    versionEndExcluding="17.6.6a"))
+    cleared = _vuln("CVE-2026-6002", "2026-04-01T00:00:00.000",
+                    "Juniper Junos OS flaw.", score=5.0,
+                    severity="MEDIUM",
+                    configurations=_configs(
+                        "junos", vendor="juniper",
+                        versionEndExcluding="20.4"))
+    calls = []
+
+    def fake_triage(text, devices_text, api_key=None, lang="en", mock=False):
+        calls.append(text)
+        return {"mode": "live", "credit_exhausted": True,
+                "error": ("Clocked API 402: Your credit allowance "
+                          "or spending limit has been reached."),
+                "verdict": None, "devices": []}
+
+    monkeypatch.setattr(batch, "run_triage", fake_triage)
+
+    def no_trace(url):
+        raise batch.FetchError("no fixture record")
+
+    rows, stats = run_feed_pipeline(
+        devices_text, mock=False, api_key="test-key",
+        nvd_fetcher=_term_fetcher({
+            "cisco": {"vulnerabilities": [hit]},
+            "juniper": {"vulnerabilities": [cleared]}}),
+        kev_fetcher=lambda url: {"vulnerabilities": []},
+        trace_fetcher=no_trace, trace_json_fetcher=no_trace,
+        now=NOW)
+    assert stats["credit_exhausted"] is True
+    assert stats["deep_triaged"] == 1
+    # Fail fast: one attempted deep triage, exactly one call.
+    assert len(calls) == 1
+    credit_rows = [r for r in rows if r.get("credit_exhausted")]
+    assert len(credit_rows) == 1
+    assert credit_rows[0]["label"] == "CVE-2026-6001"
+    assert credit_rows[0]["status"] == "error"
+    assert "triage" not in credit_rows[0]
+    local = [r for r in rows if r.get("basis") == "local-screen"]
+    assert len(local) == 1
+    assert local[0]["triage"]["verdict"] == "NOT AFFECTED"
+
+
+def test_pipeline_mock_override_beats_configured_key(monkeypatch):
+    # Demo override at pipeline level: with a key configured in
+    # the environment, mock=True still answers collection and
+    # tracing from the bundled fixtures AND judges the deep
+    # triage in Mock Mode - no network, no Clocked calls, and no
+    # credit state on the run.
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    inventory_text = (ROOT / "samples" / "inventory_sample.txt"
+                      ).read_text(encoding="utf-8")
+    rows, stats = run_feed_pipeline(inventory_text, mock=True,
+                                    now=NOW)
+    assert stats["nvd"]["count"] == 3
+    assert stats["kev"]["count"] == 1
+    assert stats["credit_exhausted"] is False
+    assert len(rows) == 4
+    judged = [r for r in rows if r.get("triage")]
+    assert judged
+    assert all(r["triage"]["mode"] == "mock" for r in judged)
+
+
 # ------------------------- stage progress --------------------------
 # Every pipeline stage reports through the one progress(index,
 # total, label) callback the UI renders, so a minutes-long feeds

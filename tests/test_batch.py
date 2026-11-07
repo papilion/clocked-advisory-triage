@@ -23,6 +23,7 @@ from batch import (  # noqa: E402
     parse_inventory_csv,
     parse_link_list,
     run_batch,
+    run_batch_items,
 )
 from triage import parse_inventory  # noqa: E402
 
@@ -283,6 +284,145 @@ def test_run_batch_korean_verdicts_stay_english_constants():
     assert "영향받는 버전" in reasons
 
 
+# --------------------- credit exhaustion -----------------------
+# When the Clocked balance dies mid-batch, run_triage returns a
+# verdict-less result flagged credit_exhausted (or, off the
+# run_triage path, raises the credit exception). The batch must
+# fail fast: no further triage calls, unjudged items become
+# localized credit error rows - never verdicts - and verdicts
+# already earned are kept.
+
+_CREDIT_RESULT = {
+    "mode": "live",
+    "credit_exhausted": True,
+    "error": ("Clocked API 402: Your credit allowance or "
+              "spending limit has been reached."),
+    "verdict": None,
+    "devices": [],
+}
+
+_THREE_ITEMS = [
+    {"label": "CVE-0001", "url": "", "text": "Advisory one text."},
+    {"label": "CVE-0002", "url": "", "text": "Advisory two text."},
+    {"label": "CVE-0003", "url": "", "text": "Advisory three text."},
+]
+
+
+def test_run_batch_items_credit_result_fails_fast(monkeypatch):
+    calls = []
+
+    def fake_triage(text, devices_text, api_key=None, lang="en", mock=False):
+        calls.append(text)
+        return dict(_CREDIT_RESULT)
+
+    monkeypatch.setattr(batch, "run_triage", fake_triage)
+    results = run_batch_items(_THREE_ITEMS, "inventory text")
+    # One triage call total: after the first credit result the
+    # remaining items are short-circuited, not judged.
+    assert len(calls) == 1
+    assert [r["status"] for r in results] == ["error"] * 3
+    assert all(r["credit_exhausted"] is True for r in results)
+    assert all("credits exhausted" in r["error"] for r in results)
+    # No entry can be mistaken for a judgment.
+    assert all("triage" not in r for r in results)
+    assert [r["label"] for r in results] == [
+        "CVE-0001", "CVE-0002", "CVE-0003"]
+
+
+def test_run_batch_items_credit_exception_fails_fast(monkeypatch):
+    class InsufficientCreditsError(Exception):
+        pass
+
+    calls = []
+
+    def fake_triage(text, devices_text, api_key=None, lang="en", mock=False):
+        calls.append(text)
+        raise InsufficientCreditsError("402")
+
+    monkeypatch.setattr(batch, "run_triage", fake_triage)
+    results = run_batch_items(_THREE_ITEMS, "inventory text")
+    assert len(calls) == 1
+    assert [r["status"] for r in results] == ["error"] * 3
+    assert all(r["credit_exhausted"] is True for r in results)
+
+
+def test_run_batch_items_keeps_verdicts_before_credit_error(
+        monkeypatch):
+    outcomes = iter([
+        {"mode": "live", "verdict": "NOT AFFECTED", "devices": []},
+        dict(_CREDIT_RESULT),
+    ])
+    calls = []
+
+    def fake_triage(text, devices_text, api_key=None, lang="en", mock=False):
+        calls.append(text)
+        return next(outcomes)
+
+    monkeypatch.setattr(batch, "run_triage", fake_triage)
+    results = run_batch_items(_THREE_ITEMS, "inventory text")
+    assert len(calls) == 2
+    assert results[0]["status"] == "ok"
+    assert results[0]["triage"]["verdict"] == "NOT AFFECTED"
+    assert results[1]["credit_exhausted"] is True
+    assert results[2]["credit_exhausted"] is True
+    assert "triage" not in results[2]
+
+
+def test_run_batch_items_credit_message_is_localized(monkeypatch):
+    def fake_triage(text, devices_text, api_key=None, lang="en", mock=False):
+        return dict(_CREDIT_RESULT)
+
+    monkeypatch.setattr(batch, "run_triage", fake_triage)
+    results = run_batch_items(_THREE_ITEMS[:1], "inventory text",
+                              lang="ko")
+    assert "크레딧이 소진" in results[0]["error"]
+
+
+def test_run_batch_credit_exhaustion_fails_fast(monkeypatch):
+    calls = []
+
+    def fake_triage(text, devices_text, api_key=None, lang="en", mock=False):
+        calls.append(text)
+        return dict(_CREDIT_RESULT)
+
+    monkeypatch.setattr(batch, "run_triage", fake_triage)
+    links = ["https://raw.example/samples/sample1_affected.txt",
+             "https://raw.example/samples/sample4_arista_affected.txt",
+             "https://raw.example/samples/sample7_arista_conditional.txt"]
+    results = run_batch(links, _sample_text("inventory_sample.txt"),
+                        fetcher=_stub_fetcher)
+    assert len(calls) == 1
+    assert [r["status"] for r in results] == ["error"] * 3
+    assert all(r["credit_exhausted"] is True for r in results)
+
+
+# --------------------- demo override (mock) ----------------------
+# The app's Demo override threads mock=True into the runners:
+# judging must stay in Mock Mode (canned verdicts, no Clocked
+# calls) even when an API key is configured in the environment.
+
+def test_run_batch_items_mock_override_beats_configured_key(
+        monkeypatch):
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    items = [{"label": "SAMPLE-1", "url": "",
+              "text": _sample_text("sample1_affected.txt")}]
+    results = run_batch_items(
+        items, _sample_text("inventory_sample.txt"), mock=True)
+    assert results[0]["status"] == "ok"
+    assert results[0]["triage"]["mode"] == "mock"
+    assert results[0]["triage"]["verdict"] == "AFFECTED"
+
+
+def test_run_batch_mock_override_beats_configured_key(monkeypatch):
+    monkeypatch.setenv("CLOCKED_API_KEY", "test-key-not-a-real-secret")
+    links = ["https://raw.example/samples/sample1_affected.txt"]
+    results = run_batch(links, _sample_text("inventory_sample.txt"),
+                        fetcher=_stub_fetcher, mock=True)
+    assert results[0]["status"] == "ok"
+    assert results[0]["triage"]["mode"] == "mock"
+    assert results[0]["triage"]["verdict"] == "AFFECTED"
+
+
 # ------------------------- batch UI (AppTest) ------------------------
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -307,6 +447,27 @@ def _click_button(at, label_part):
 def test_batch_mode_is_default_and_renders():
     at = _fresh_batch_app()
     assert at.radio[0].value == "batch"
+
+
+def test_batch_credit_exhausted_shows_banner():
+    # A credit-exhausted run's results carry flagged error
+    # entries; the results area must lead with the Demo-mode
+    # banner, in the exact prescribed wording.
+    at = _fresh_batch_app()
+    at.session_state["batch_results"] = [{
+        "url": "", "label": "CVE-0001", "status": "error",
+        "error": "Not judged - Clocked API credits exhausted.",
+        "credit_exhausted": True,
+    }]
+    at.run()
+    assert not at.exception
+    warnings = [w.value or "" for w in at.warning]
+    assert any(
+        w == ("Clocked API credits exhausted — Live judging is "
+              "unavailable right now. Switch to Demo mode to "
+              "explore the seven bundled sample advisories (all "
+              "verdict types, no API calls).")
+        for w in warnings), warnings
     labels = [b.label or "" for b in at.button]
     # Default source is the listing page: vendor presets show
     # (the sample-link button lives in Link list source mode).

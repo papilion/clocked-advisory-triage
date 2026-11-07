@@ -88,6 +88,11 @@ STRINGS = {
             "the bundled samples run on canned Clocked responses. Arbitrary "
             "pasted text needs a key for live analysis."
         ),
+        "mode_demo": (
+            "Mode: DEMO - Demo override is on: canned responses, "
+            "no API calls, even though an API key is configured."
+        ),
+        "demo_override_label": "Demo mode (canned responses, no API calls)",
         "samples_heading": "Bundled samples",
         "sample_labels": {
             "sample1": "Sample 1 - Affected (Cisco-style)",
@@ -107,6 +112,12 @@ STRINGS = {
         "run_button": "Run Triage",
         "empty_advisory": "Paste an advisory first — or click one of the samples above.",
         "run_failed": "The triage run failed. Please try again.",
+        "credits_exhausted_banner": (
+            "Clocked API credits exhausted — Live judging is "
+            "unavailable right now. Switch to Demo mode to explore "
+            "the seven bundled sample advisories (all verdict "
+            "types, no API calls)."
+        ),
         "error_details": "Error details",
         "spinner": "Running Extract -> match -> Decide -> Verify...",
         "verdict_heading": "Verdict",
@@ -335,6 +346,12 @@ STRINGS = {
             "포함된 샘플이 저장된 Clocked 응답으로 실행됩니다. 임의의 "
             "텍스트를 실시간으로 분석하려면 키가 필요합니다."
         ),
+        "mode_demo": (
+            "모드: DEMO - Demo 모드가 강제 설정되어 고정 응답을 "
+            "사용하며, API 키가 설정되어 있어도 API를 호출하지 "
+            "않습니다."
+        ),
+        "demo_override_label": "Demo 모드 (고정 응답 사용, API 호출 없음)",
         "samples_heading": "포함된 샘플",
         "sample_labels": {
             "sample1": "샘플 1 - 해당 있음 (Cisco 형식)",
@@ -354,6 +371,11 @@ STRINGS = {
         "run_button": "판정 실행",
         "empty_advisory": "권고문을 먼저 붙여넣어 주세요 — 위 샘플 버튼을 눌러도 됩니다.",
         "run_failed": "판정 실행에 실패했습니다. 다시 시도해 주세요.",
+        "credits_exhausted_banner": (
+            "Clocked API 크레딧이 소진되어 라이브 판정을 사용할 수 "
+            "없습니다. Demo 모드로 전환하면 번들 샘플 권고 7종(모든 "
+            "판정 유형)을 API 호출 없이 체험할 수 있습니다."
+        ),
         "error_details": "오류 상세",
         "spinner": "Extract -> 매칭 -> Decide -> Verify 실행 중...",
         "verdict_heading": "판정",
@@ -700,15 +722,27 @@ def main():
     s = STRINGS[lang]
 
     live = _has_key()
+    # Demo override (keyed checkbox below the banner): with a key
+    # configured it defaults off (Live judging); without a key,
+    # Demo is the only possible mode, so it defaults - and stays -
+    # on (the checkbox is disabled then). The banner reflects the
+    # EFFECTIVE mode, read from session state before the checkbox
+    # is created, so toggling re-renders it on the next run.
+    st.session_state.setdefault("demo_override", not live)
+    demo_mode = bool(st.session_state["demo_override"]) or not live
 
     st.title(s["title"])
     if s["title_subtitle"]:
         st.caption(s["title_subtitle"])
     st.write(s["pitch"])
-    if live:
-        st.success(s["mode_live"])
-    else:
+    if not live:
         st.warning(s["mode_mock"])
+    elif demo_mode:
+        st.warning(s["mode_demo"])
+    else:
+        st.success(s["mode_live"])
+    st.checkbox(s["demo_override_label"], key="demo_override",
+                disabled=not live)
 
     # Widget state defaults. The two text areas below are keyed
     # "advisory_text" / "inventory_text", so the widget keys ARE these
@@ -732,16 +766,16 @@ def main():
     )
 
     if ui_mode == "batch":
-        _render_batch_mode(s, lang)
+        _render_batch_mode(s, lang, demo_mode)
     else:
-        _render_paste_mode(s, lang)
+        _render_paste_mode(s, lang, demo_mode)
 
     st.divider()
     st.caption(s["footer"])
 
 
-def _render_paste_mode(s, lang):
-    # type: (Dict[str, Any], str) -> None
+def _render_paste_mode(s, lang, demo_mode=False):
+    # type: (Dict[str, Any], str, bool) -> None
     st.subheader(s["samples_heading"])
     if s["samples_note"]:
         st.caption(s["samples_note"])
@@ -786,6 +820,7 @@ def _render_paste_mode(s, lang):
                             inventory_text,
                             sample_id=st.session_state.get("sample_id"),
                             lang=lang,
+                            mock=demo_mode,
                         )
                 except Exception:
                     # Show a localized banner, not Streamlit's raw
@@ -803,6 +838,15 @@ def _render_paste_mode(s, lang):
             st.warning(s["empty_advisory"])
         elif result is None:
             st.info(s["empty_hint"])
+        elif result.get("credit_exhausted"):
+            # Credit exhaustion is a run state, not a failure:
+            # one prominent banner, with the raw API detail kept
+            # in the collapsed expander for debugging.
+            st.warning(s["credits_exhausted_banner"])
+            detail = result.get("error")
+            if detail:
+                with st.expander(s["error_details"], expanded=False):
+                    st.code(str(detail))
         elif result.get("error"):
             st.error(str(result.get("error")))
             error_detail = result.get("error_detail")
@@ -813,8 +857,8 @@ def _render_paste_mode(s, lang):
             _render_result(result, s, lang)
 
 
-def _render_batch_mode(s, lang):
-    # type: (Dict[str, Any], str) -> None
+def _render_batch_mode(s, lang, demo_mode=False):
+    # type: (Dict[str, Any], str, bool) -> None
     """Batch workflow: advisory links (harvested from a listing
     page, or pasted as a list) + inventory CSV in, an action
     summary, a summary table, and one detail expander per advisory
@@ -993,7 +1037,7 @@ def _render_batch_mode(s, lang):
                 # type: (Any) -> List[Dict[str, Any]]
                 rows, stats = run_feed_pipeline(
                     devices_text, lang=lang, judge_all=judge_all,
-                    progress=progress, mock=not _has_key())
+                    progress=progress, mock=demo_mode)
                 st.session_state["feed_info"] = stats
                 return rows
 
@@ -1020,11 +1064,11 @@ def _render_batch_mode(s, lang):
         elif items is not None:
             _run_judging(lambda progress: run_batch_items(
                 items, devices_text, lang=lang, progress=progress,
-                prefilter=not judge_all))
+                prefilter=not judge_all, mock=demo_mode))
         elif source in ("links", "listing"):
             _run_judging(lambda progress: run_batch(
                 run_urls, devices_text, lang=lang, progress=progress,
-                prefilter=not judge_all))
+                prefilter=not judge_all, mock=demo_mode))
 
     if st.session_state.get("batch_notice_empty"):
         st.warning(s["empty_links"])
@@ -1249,6 +1293,12 @@ def _device_verdict_summary(results, devices, lang):
 
 def _render_batch_results(results, s, lang, devices=None):
     # type: (List[Dict[str, Any]], Dict[str, Any], str, Optional[List[Dict[str, str]]]) -> None
+    # Credit exhaustion is a run-level state, not a verdict: when
+    # any entry carries the flag, one prominent banner sits above
+    # everything else in the results area (the unjudged entries
+    # below render as plain error rows).
+    if any(item.get("credit_exhausted") for item in results):
+        st.warning(s["credits_exhausted_banner"])
     # Action summary first: only the advisories that need action,
     # AFFECTED before CANNOT DETERMINE, one line + link each.
     actionable = []  # type: List[Any]
