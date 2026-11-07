@@ -1,0 +1,22 @@
+SYNTHETIC SAMPLE ADVISORY - FOR DEMONSTRATION ONLY
+
+Advisory ID: SYN-ARS-2026-1104
+CVE-style reference: CVE-2026-90004 (synthetic)
+
+Vendor: Arista-style Networks (synthetic sample)
+Product: Arista 7050SX3 Series Switches
+Affected software: EOS 4.30.4M, 4.30.5M
+Severity: High
+
+Description:
+A synthetic vulnerability in the sample EOS management plane could
+allow an authenticated remote sender to execute commands with elevated
+privileges on the affected device. This text is invented for
+demonstration and does not describe a real product defect.
+
+Fixed software: EOS 4.30.6M or later.
+Action deadline: Apply the fixed software or an approved workaround
+before 2026-11-25.
+
+Workaround: Restrict EOS management access (SSH and the API) to trusted
+management networks until fixed software is installed.

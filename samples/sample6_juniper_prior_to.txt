@@ -1,0 +1,23 @@
+SYNTHETIC SAMPLE ADVISORY - FOR DEMONSTRATION ONLY
+
+Advisory ID: SYN-JUN-2026-1106
+CVE-style reference: CVE-2026-90006 (synthetic)
+
+Vendor: Juniper-style Networks (synthetic sample)
+Product: MX480 Router
+Affected software: Junos OS versions prior to 21.4R2
+Severity: High
+
+Description:
+A synthetic issue in the sample routing protocol implementation could
+allow an unauthenticated remote sender to cause a denial of service
+on MX480 systems running Junos OS versions earlier than 21.4R2. This
+text is invented for demonstration and does not describe a real product
+defect.
+
+Fixed software: Junos OS 21.4R2 or later.
+Action deadline: Apply the fixed software or an approved workaround
+before 2026-12-05.
+
+Workaround: Apply standard control-plane filtering until fixed
+software is installed.

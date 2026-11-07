@@ -381,5 +381,497 @@
    "ungrounded": 0.88,
    "verdict": "ungrounded"
   }
+ },
+ "sample4": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.95,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.9,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.86,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 672,
+     "p_verify": 0.99,
+     "start": 662,
+     "value": "2026-11-25"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 82,
+     "p_verify": 0.99,
+     "start": 65,
+     "value": "SYN-ARS-2026-1104"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 251,
+       "p_verify": 0.99,
+       "start": 244,
+       "value": "4.30.4M"
+      },
+      {
+       "confidence": 0.99,
+       "end": 260,
+       "p_verify": 0.99,
+       "start": 253,
+       "value": "4.30.5M"
+      }
+     ],
+     "value": [
+      "4.30.4M",
+      "4.30.5M"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 130,
+     "p_verify": 0.99,
+     "start": 104,
+     "value": "CVE-2026-90004 (synthetic)"
+    },
+    "fixed_version": {
+     "confidence": 0.99,
+     "end": 585,
+     "p_verify": 0.99,
+     "start": 565,
+     "value": "EOS 4.30.6M or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 204,
+       "p_verify": 0.99,
+       "start": 190,
+       "value": "Arista 7050SX3"
+      }
+     ],
+     "value": [
+      "Arista 7050SX3"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 275,
+     "p_verify": 0.99,
+     "start": 271,
+     "value": "High"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 180,
+     "p_verify": 0.99,
+     "start": 140,
+     "value": "Arista-style Networks (synthetic sample)"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.94,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.04,
+     "supported": 0.95,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.95,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.05,
+   "verdict": "grounded"
+  }
+ },
+ "sample5": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.95,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.92,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.87,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 662,
+     "p_verify": 0.99,
+     "start": 652,
+     "value": "2026-11-28"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 82,
+     "p_verify": 0.99,
+     "start": 65,
+     "value": "SYN-JUN-2026-1105"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 249,
+       "p_verify": 0.99,
+       "start": 243,
+       "value": "21.2R1"
+      },
+      {
+       "confidence": 0.99,
+       "end": 257,
+       "p_verify": 0.99,
+       "start": 251,
+       "value": "21.2R2"
+      },
+      {
+       "confidence": 0.99,
+       "end": 265,
+       "p_verify": 0.99,
+       "start": 259,
+       "value": "21.2R3"
+      }
+     ],
+     "value": [
+      "21.2R1",
+      "21.2R2",
+      "21.2R3"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 130,
+     "p_verify": 0.99,
+     "start": 104,
+     "value": "CVE-2026-90005 (synthetic)"
+    },
+    "fixed_version": {
+     "confidence": 0.99,
+     "end": 575,
+     "p_verify": 0.99,
+     "start": 551,
+     "value": "Junos OS 21.2R4 or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 198,
+       "p_verify": 0.99,
+       "start": 191,
+       "value": "QFX5110"
+      }
+     ],
+     "value": [
+      "QFX5110"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 280,
+     "p_verify": 0.99,
+     "start": 276,
+     "value": "High"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 181,
+     "p_verify": 0.99,
+     "start": 140,
+     "value": "Juniper-style Networks (synthetic sample)"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.94,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.04,
+     "supported": 0.95,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.95,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.05,
+   "verdict": "grounded"
+  }
+ },
+ "sample6": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.93,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.9,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.85,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 701,
+     "p_verify": 0.99,
+     "start": 691,
+     "value": "2026-12-05"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 82,
+     "p_verify": 0.99,
+     "start": 65,
+     "value": "SYN-JUN-2026-1106"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 256,
+       "p_verify": 0.99,
+       "start": 223,
+       "value": "Junos OS versions prior to 21.4R2"
+      }
+     ],
+     "value": [
+      "Junos OS versions prior to 21.4R2"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 130,
+     "p_verify": 0.99,
+     "start": 104,
+     "value": "CVE-2026-90006 (synthetic)"
+    },
+    "fixed_version": {
+     "confidence": 0.99,
+     "end": 614,
+     "p_verify": 0.99,
+     "start": 590,
+     "value": "Junos OS 21.4R2 or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 196,
+       "p_verify": 0.99,
+       "start": 191,
+       "value": "MX480"
+      }
+     ],
+     "value": [
+      "MX480"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 271,
+     "p_verify": 0.99,
+     "start": 267,
+     "value": "High"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 181,
+     "p_verify": 0.99,
+     "start": 140,
+     "value": "Juniper-style Networks (synthetic sample)"
+    },
+    "version_constraints": {
+     "confidence": 1.0,
+     "items": [],
+     "value": []
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.94,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.04,
+     "supported": 0.95,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.95,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.05,
+   "verdict": "grounded"
+  }
+ },
+ "sample7": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.62,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.35,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.58,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 853,
+     "p_verify": 0.99,
+     "start": 843,
+     "value": "2026-12-10"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 82,
+     "p_verify": 0.99,
+     "start": 65,
+     "value": "SYN-ARS-2026-1107"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 251,
+       "p_verify": 0.99,
+       "start": 244,
+       "value": "4.30.5M"
+      }
+     ],
+     "value": [
+      "4.30.5M"
+     ]
+    },
+    "applicability_conditions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 515,
+       "p_verify": 0.99,
+       "start": 428,
+       "value": "applies only when TerminAttr is configured to communicate with CloudVision Portal (CVP)"
+      }
+     ],
+     "value": [
+      "applies only when TerminAttr is configured to communicate with CloudVision Portal (CVP)"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 130,
+     "p_verify": 0.99,
+     "start": 104,
+     "value": "CVE-2026-90007 (synthetic)"
+    },
+    "fixed_version": {
+     "confidence": 0.99,
+     "end": 726,
+     "p_verify": 0.99,
+     "start": 706,
+     "value": "EOS 4.30.6M or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 204,
+       "p_verify": 0.99,
+       "start": 190,
+       "value": "Arista 7050SX3"
+      }
+     ],
+     "value": [
+      "Arista 7050SX3"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 266,
+     "p_verify": 0.99,
+     "start": 262,
+     "value": "High"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 180,
+     "p_verify": 0.99,
+     "start": 140,
+     "value": "Arista-style Networks (synthetic sample)"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.91,
+   "claims": [
+    {
+     "claim": "verdict claim for this sample",
+     "contradicted": 0.01,
+     "not_stated": 0.06,
+     "supported": 0.93,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.93,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.07,
+   "verdict": "grounded"
+  }
  }
 }

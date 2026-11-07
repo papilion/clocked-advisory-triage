@@ -1,17 +1,42 @@
 """Core triage logic for Advisory Triage for Network Operators.
 
 All Clocked SDK access lives in this module (and nowhere else).
-Pipeline per run (exactly 3 Clocked calls in live mode):
+Pipeline per run (exactly 4 Clocked calls in live mode):
   1. extract   - pull structured fields from the advisory text
+  1b. extract  - focused second pass whose ONLY field is
+                 applicability_conditions: measured live, span
+                 extraction of that field is unreliable inside the
+                 full-field call (it came back empty even when the
+                 condition sentence was plainly in the text), while
+                 the focused call returns it reliably
   2. (local)   - deterministic matcher: extracted product/version vs inventory
   3. decide    - urgency + evidence sufficiency, with probabilities
   4. grounding - Verify step: check the verdict claim against the
                  advisory AND the inventory it was matched against
 
+Robustness features in the matcher:
+  - Narrative version conditions: Extract returns verbatim spans,
+    so prose statements like "versions prior to 21.4R2" are turned
+    into constraints ("before:21.4R2", "up_to:X",
+    "train_before:T:B") by deterministic LOCAL derivation in
+    normalize_extraction (normalized tokens are not requested from
+    Extract - they are not spans - but the parser still merges in
+    any a response carries), and evaluated deterministically when the
+    explicit affected-version list does not decide a device.
+  - Applicability conditions: when an advisory applies only under a
+    stated condition (e.g. a feature configured a certain way), a
+    product+version match is gated to CANNOT DETERMINE - the
+    inventory cannot confirm the condition - with the condition
+    named in the reason, the warnings, and the checklist.
+
 Mock Mode: when no CLOCKED_API_KEY is available, canned responses from
-mock_responses.json are used for the three bundled samples. Arbitrary
+mock_responses.json are used for the bundled samples. Arbitrary
 pasted text in Mock Mode does NOT get a fabricated verdict; the caller
 is told a key is needed for live analysis.
+
+Display text (reasons, warnings, checklists) can be localized with
+run_triage(..., lang="ko"); verdict constants, the grounding claim,
+and all Clocked prompts always stay English.
 
 Python 3.9 compatible: typing.Optional / Union only, no PEP 604 unions.
 """
@@ -29,6 +54,123 @@ ROOT = Path(__file__).resolve().parent
 VERDICT_AFFECTED = "AFFECTED"
 VERDICT_NOT_AFFECTED = "NOT AFFECTED"
 VERDICT_CANNOT = "CANNOT DETERMINE"
+
+
+# --------------------------------------------------------------------------
+# Localization (display text only)
+#
+# Internal verdict constants, the grounding claim, and all Clocked
+# prompts stay English regardless of `lang`; only user-facing text
+# generated here (match reasons, warnings, checklists, Mock Mode
+# notice) is localized. Supported languages: "en" (default), "ko".
+# --------------------------------------------------------------------------
+
+def _normalize_lang(lang):
+    # type: (Optional[str]) -> str
+    return "ko" if lang == "ko" else "en"
+
+
+REASON_STRINGS = {
+    "en": {
+        "no_product": "Advisory extraction named no product; cannot determine.",
+        "different_product": "Device product is not one of the products named in the advisory.",
+        "no_affected_versions": "Product matches, but the advisory states no affected versions.",
+        "unparseable_version": "Product matches, but the device version %r is unparseable.",
+        "version_affected": "Version %s is listed as affected (%s).",
+        "version_inconclusive": "Product matches, but version comparison was inconclusive.",
+        "version_not_affected": "Product matches, but version %s is not in the affected list.",
+        "version_constraint_before": (
+            "Version %s is before %s, the first fixed release stated "
+            "in the advisory."
+        ),
+        "version_constraint_up_to": (
+            "Version %s is at or before %s, the last affected version "
+            "stated in the advisory."
+        ),
+        "version_constraint_train_before": (
+            "Version %s is in the %s train and before %s, the first "
+            "fixed release stated in the advisory."
+        ),
+        "version_constraint_not_satisfied": (
+            "Product matches, but version %s does not satisfy the "
+            "version condition stated in the advisory."
+        ),
+        "condition_gate": (
+            "Matches the affected product and version, but the "
+            "advisory applies only when: %s - the inventory does "
+            "not confirm this."
+        ),
+    },
+    "ko": {
+        "no_product": "권고문 추출 결과에 제품이 명시되지 않아 판정할 수 없습니다.",
+        "different_product": "이 장비의 제품은 권고문에 명시된 제품에 해당하지 않습니다.",
+        "no_affected_versions": "제품은 일치하지만 권고문에 영향받는 버전이 명시되지 않았습니다.",
+        "unparseable_version": "제품은 일치하지만 장비 버전 %r을(를) 해석할 수 없습니다.",
+        "version_affected": "버전 %s이(가) 영향받는 버전(%s)으로 명시되어 있습니다.",
+        "version_inconclusive": "제품은 일치하지만 버전 비교 결과를 확정할 수 없습니다.",
+        "version_not_affected": "제품은 일치하지만 버전 %s은(는) 영향받는 버전에 포함되지 않습니다.",
+        "version_constraint_before": (
+            "버전 %s이(가) 권고문에 명시된 최초 수정 버전 %s보다 이전입니다."
+        ),
+        "version_constraint_up_to": (
+            "버전 %s이(가) 권고문에 명시된 마지막 영향 버전 %s 이하입니다."
+        ),
+        "version_constraint_train_before": (
+            "버전 %s이(가) %s 트레인에 속하고 권고문에 명시된 최초 수정 "
+            "버전 %s보다 이전입니다."
+        ),
+        "version_constraint_not_satisfied": (
+            "제품은 일치하지만 버전 %s은(는) 권고문에 명시된 버전 조건을 "
+            "충족하지 않습니다."
+        ),
+        "condition_gate": (
+            "영향받는 제품과 버전은 일치하지만, 이 권고문은 다음 조건에서만 "
+            "적용됩니다: %s - 인벤토리에서 이 조건을 확인할 수 없습니다."
+        ),
+    },
+}
+
+WARNING_STRINGS = {
+    "en": {
+        "low_sufficiency": (
+            "CANNOT DETERMINE: Decide rated the advisory evidence as "
+            "insufficient (probability %s)."
+        ),
+        "grounding": (
+            "CANNOT DETERMINE: Verify (grounding) did not verify the "
+            "verdict claim against the advisory and inventory texts "
+            "(verdict=%r, answers_question=%r)."
+        ),
+        "condition_check": "Condition check required: %s",
+    },
+    "ko": {
+        "low_sufficiency": (
+            "판정 불가: Decide가 권고문의 근거가 충분하지 않다고 "
+            "판단했습니다 (확률 %s)."
+        ),
+        "grounding": (
+            "판정 불가: Verify(grounding)가 판정 문장을 권고문과 "
+            "인벤토리 원문으로 검증하지 못했습니다 "
+            "(verdict=%r, answers_question=%r)."
+        ),
+        "condition_check": "조건 확인 필요: %s",
+    },
+}
+
+MOCK_ERROR_STRINGS = {
+    "en": (
+        "Mock Mode: no CLOCKED_API_KEY is configured, so live "
+        "analysis is unavailable. Use one of the bundled samples "
+        "for the demo, or set CLOCKED_API_KEY for live analysis "
+        "of arbitrary text."
+    ),
+    "ko": (
+        "데모 데이터 모드: CLOCKED_API_KEY가 설정되지 않아 실시간 "
+        "분석을 사용할 수 없습니다. 데모는 포함된 샘플을 사용하거나, "
+        "임의의 텍스트를 실시간으로 분석하려면 CLOCKED_API_KEY를 "
+        "설정하세요."
+    ),
+}
 
 GENERIC_PRODUCT_WORDS = {
     "series", "switch", "switches", "router", "routers", "family",
@@ -140,6 +282,321 @@ def version_matches(device_version, affected_entry):
 
 
 # --------------------------------------------------------------------------
+# Narrative version constraints ("prior to X" and friends)
+#
+# Normalized constraint strings look like "before:21.4R2",
+# "up_to:17.9.5", "train_before:4.30:4.30.6M".
+# parse_version_constraint turns those into structured dicts and
+# constraint_matches evaluates them deterministically.
+#
+# Where the strings come from: Extract is span-based and returns
+# verbatim text, so a normalized token is usually NOT a span and the
+# version_constraints field comes back empty live. The reliable
+# source is local and deterministic: derive_version_constraints
+# scans the verbatim affected-version statements (and, as a guarded
+# fallback, the fixed version) for bound phrases and builds the same
+# structured constraints. Explicit tokens Extract does emit are kept
+# and merged (see normalize_extraction).
+# --------------------------------------------------------------------------
+
+def parse_version_constraint(text):
+    # type: (str) -> Optional[Dict[str, Any]]
+    """Parse a normalized constraint string into a structured dict.
+
+    Returns {"relation": ..., "version": ..., ["train": ...]} or
+    None when the string is not a recognized constraint form.
+    """
+    raw = str(text or "").strip()
+    lowered = raw.lower()
+    if lowered.startswith("train_before:"):
+        parts = raw[len("train_before:"):].split(":")
+        if len(parts) != 2:
+            return None
+        train = parts[0].strip()
+        bound = parts[1].strip()
+        if not train or not bound:
+            return None
+        return {"relation": "train_before", "train": train,
+                "version": bound}
+    if lowered.startswith("before:"):
+        bound = raw[len("before:"):].strip()
+        if not bound:
+            return None
+        return {"relation": "before", "version": bound}
+    if lowered.startswith("up_to:"):
+        bound = raw[len("up_to:"):].strip()
+        if not bound:
+            return None
+        return {"relation": "up_to", "version": bound}
+    return None
+
+
+def _version_letters(version_text):
+    # type: (str) -> str
+    """All letters of a version string, lowercased, in order.
+
+    Used as a tie-break signature: '4.30.5M' -> 'm', '21.4R2' -> 'r'.
+    """
+    return "".join(ch for ch in str(version_text or "").lower()
+                   if ch.isalpha())
+
+
+def _compare_versions(device_text, bound_text):
+    # type: (str, str) -> Optional[int]
+    """Compare two versions numerically: -1, 0, or 1.
+
+    Returns None when either side is unparseable, or when the numeric
+    tuples are EQUAL but the letter signatures differ (e.g. device
+    4.30.5F vs bound 4.30.5M): suffix ordering is vendor-specific, so
+    that case is unknown and must never be guessed.
+    """
+    device_tuple = parse_version(device_text)
+    bound_tuple = parse_version(bound_text)
+    if device_tuple is None or bound_tuple is None:
+        return None
+    width = max(len(device_tuple), len(bound_tuple))
+    padded_device = device_tuple + (0,) * (width - len(device_tuple))
+    padded_bound = bound_tuple + (0,) * (width - len(bound_tuple))
+    if padded_device < padded_bound:
+        return -1
+    if padded_device > padded_bound:
+        return 1
+    if _version_letters(device_text) != _version_letters(bound_text):
+        return None
+    return 0
+
+
+def constraint_matches(device_version, constraint):
+    # type: (str, Dict[str, Any]) -> Optional[bool]
+    """Evaluate one structured constraint against a device version.
+
+    before:       device < bound
+    up_to:        device <= bound
+    train_before: device major.minor digits == train digits AND
+                  device < bound
+    Returns None when the comparison cannot be made.
+    """
+    if not isinstance(constraint, dict):
+        return None
+    relation = constraint.get("relation")
+    bound = constraint.get("version")
+    if not bound:
+        return None
+    if relation == "train_before":
+        train_tuple = parse_version(constraint.get("train"))
+        device_tuple = parse_version(device_version)
+        if train_tuple is None or device_tuple is None:
+            return None
+        if device_tuple[:len(train_tuple)] != train_tuple:
+            return False
+        compared = _compare_versions(device_version, bound)
+        if compared is None:
+            return None
+        return compared < 0
+    compared = _compare_versions(device_version, bound)
+    if compared is None:
+        return None
+    if relation == "before":
+        return compared < 0
+    if relation == "up_to":
+        return compared <= 0
+    return None
+
+
+# --------------------------------------------------------------------------
+# Local derivation of version constraints from prose statements
+# --------------------------------------------------------------------------
+
+_BOUND_BEFORE_RE = re.compile(
+    r"\b(prior\s+to|before|earlier\s+than)\b", re.IGNORECASE)
+_BOUND_UP_TO_RE = re.compile(
+    r"\b(and\s+earlier|or\s+earlier|up\s+to\s+and\s+including)\b",
+    re.IGNORECASE)
+_BOUND_KEYWORD_RE = re.compile(r"\b(prior|before|earlier)\b",
+                               re.IGNORECASE)
+
+
+# Wording that marks an affected-version item as a prose STATEMENT
+# (a bound or a qualifier) rather than a plain version - used both
+# by _is_decidable_list_entry and _prefixed_version_token.
+_PROSE_ITEM_RE = re.compile(
+    r"\b(prior|before|earlier|later|including|versions|releases)\b"
+    r"|\bup\s+to\b",
+    re.IGNORECASE)
+
+
+def _is_plain_version_item(text):
+    # type: (str) -> bool
+    """True when a string is a single decidable version entry.
+
+    Plain entries ("17.9.4", "21.4R2", "17.9.x", "17.9.1-17.9.5",
+    "7.0(3)I4(4)") are decided by version_matches directly. Anything
+    with whitespace or prose wording is a statement, not a version.
+    """
+    stripped = str(text or "").strip()
+    if not stripped or not stripped[0].isdigit():
+        return False
+    if any(ch.isspace() for ch in stripped):
+        return False
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.\-+()]*", stripped):
+        return False
+    return parse_version(stripped) is not None
+
+
+def _is_decidable_list_entry(entry):
+    # type: (Any) -> bool
+    """True when an affected-version entry can decide a device.
+
+    Tolerates spaces around range hyphens ("17.9.1 - 17.9.5") by
+    checking the whitespace-free form; multi-word prose stays
+    undecidable. Prose wording is checked on the ORIGINAL text
+    first: digit-leading prose ("17.9.5 and earlier") would
+    otherwise squash into a pseudo-version ("17.9.5andearlier")
+    and manufacture a decision the statement never made.
+    """
+    text = str(entry or "").strip()
+    if _PROSE_ITEM_RE.search(text):
+        return False
+    if _is_plain_version_item(text):
+        return True
+    squashed = re.sub(r"\s+", "", text)
+    return bool(squashed) and squashed[0].isdigit() \
+        and _is_plain_version_item(squashed)
+
+
+def _version_token(text):
+    # type: (str) -> Optional[str]
+    """First plain-version token in a phrase, or None.
+
+    Vendor prefixes and filler words ("Junos OS", "or later") are
+    skipped naturally: they are not plain version items.
+    """
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-+()]*",
+                       str(text or ""))
+    for word in words:
+        token = word.strip(".")
+        if _is_plain_version_item(token):
+            return token
+    return None
+
+
+def _prefixed_version_token(text):
+    # type: (str) -> Optional[str]
+    """Version token of a vendor-prefixed version item, or None.
+
+    Live extraction returns affected-version items with vendor
+    prefixes - "EOS 4.30.5M", "Junos OS 21.2R1" - which are plain
+    versions once the prefix is dropped: exactly one plain-version
+    token, no other digit-bearing word, and no prose wording.
+    Anything else (bound phrases like "versions prior to X",
+    "X and earlier", "up to and including X", or an item carrying
+    several version tokens) is a statement, not a version: returns
+    None so the item stays undecidable and the constraint
+    derivation speaks for it.
+    """
+    stripped = str(text or "").strip()
+    if not stripped or _PROSE_ITEM_RE.search(stripped):
+        return None
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-+()]*", stripped)
+    tokens = []  # type: List[str]
+    for word in words:
+        token = word.strip(".")
+        if _is_plain_version_item(token):
+            tokens.append(token)
+    if len(tokens) != 1:
+        return None
+    token = tokens[0]
+    for word in words:
+        if word.strip(".") != token \
+                and any(ch.isdigit() for ch in word):
+            return None
+    return token
+
+
+def _train_token(text):
+    # type: (str) -> Optional[str]
+    """Release-train prefix from a wildcard token ("4.30.x" -> "4.30")."""
+    for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9.]*",
+                           str(text or "")):
+        parts = word.strip(".").split(".")
+        if len(parts) >= 2 and parts[-1].lower() == "x" \
+                and all(p.isdigit() for p in parts[:-1]):
+            return ".".join(parts[:-1])
+    return None
+
+
+def derive_version_constraints(affected_versions, fixed_version=None):
+    # type: (Any, Optional[str]) -> List[Dict[str, Any]]
+    """Derive structured constraints from prose affected statements.
+
+    Rules (all deterministic, shared by the mock and live paths):
+    - An item containing a bound phrase yields a constraint whose
+      bound is the version token in that item: "prior to / before /
+      earlier than X" -> before:X; "X and earlier / or earlier /
+      up to and including X" -> up_to:X; a wildcard train token in
+      the item ("4.30.x ... prior to 4.30.6M") -> train_before.
+    - Conservative fallback: when NO item is a plain decidable
+      version, at least one item carries a bound keyword, and a
+      fixed version is stated, derive before:<fixed version token>.
+    - Plain version items never yield constraints, and vague prose
+      without a bound keyword yields none either.
+
+    Returned entries carry "confidence": None (locally derived, not
+    an extractor probability).
+    """
+    items = []  # type: List[str]
+    if isinstance(affected_versions, str):
+        items = [affected_versions]
+    elif isinstance(affected_versions, (list, tuple)):
+        items = [str(v) for v in affected_versions]
+
+    derived = []  # type: List[Dict[str, Any]]
+    seen = set()  # type: set
+
+    def _add(entry):
+        # type: (Dict[str, Any]) -> None
+        key = (entry["relation"], entry["version"], entry.get("train"))
+        if key not in seen:
+            seen.add(key)
+            derived.append(entry)
+
+    any_plain = any(_is_plain_version_item(item) for item in items)
+    bound_keyword_seen = False
+    for item in items:
+        if _is_plain_version_item(item):
+            continue
+        if _BOUND_KEYWORD_RE.search(item):
+            bound_keyword_seen = True
+        before_match = _BOUND_BEFORE_RE.search(item)
+        up_to_match = _BOUND_UP_TO_RE.search(item)
+        if before_match:
+            token = _version_token(item[before_match.end():]) \
+                or _version_token(item)
+            if token and not token.lower().endswith(".x"):
+                train = _train_token(item)
+                if train:
+                    _add({"relation": "train_before", "train": train,
+                          "version": token, "confidence": None})
+                else:
+                    _add({"relation": "before", "version": token,
+                          "confidence": None})
+        elif up_to_match:
+            token = _version_token(item[:up_to_match.start()]) \
+                or _version_token(item)
+            if token and not token.lower().endswith(".x"):
+                _add({"relation": "up_to", "version": token,
+                      "confidence": None})
+
+    if not derived and not any_plain and bound_keyword_seen \
+            and fixed_version:
+        token = _version_token(str(fixed_version))
+        if token and not token.lower().endswith(".x"):
+            _add({"relation": "before", "version": token,
+                  "confidence": None})
+    return derived
+
+
+# --------------------------------------------------------------------------
 # Product matching + deterministic matcher (0 API calls)
 # --------------------------------------------------------------------------
 
@@ -169,87 +626,167 @@ def product_matches(device_model, products):
     return False
 
 
-def match_device(device, extracted):
-    # type: (Dict[str, str], Dict[str, Any]) -> Dict[str, Any]
+def _row(hostname, model, version, candidate, status, reason,
+         condition_gated=False):
+    # type: (str, str, str, bool, str, str, bool) -> Dict[str, Any]
+    return {
+        "hostname": hostname, "model": model, "version": version,
+        "candidate": candidate, "status": status, "reason": reason,
+        "condition_gated": condition_gated,
+    }
+
+
+def _constraint_reason(reasons, constraint, version):
+    # type: (Dict[str, str], Dict[str, Any], str) -> str
+    relation = constraint.get("relation")
+    bound = constraint.get("version")
+    if relation == "train_before":
+        return reasons["version_constraint_train_before"] % (
+            version, constraint.get("train"), bound)
+    if relation == "up_to":
+        return reasons["version_constraint_up_to"] % (version, bound)
+    return reasons["version_constraint_before"] % (version, bound)
+
+
+def match_device(device, extracted, lang="en"):
+    # type: (Dict[str, str], Dict[str, Any], str) -> Dict[str, Any]
     """Match one device against extracted advisory fields.
 
     Rules:
     - No product extracted at all            -> CANNOT DETERMINE
     - Device product differs from advisory   -> NOT AFFECTED
-    - Product matches, no affected versions  -> CANNOT DETERMINE
+    - Product matches, nothing to compare    -> CANNOT DETERMINE
+      (no affected versions AND no version constraints)
     - Product matches, version unparseable   -> CANNOT DETERMINE
     - Product matches, version in affected   -> AFFECTED
     - Product matches, version not affected  -> NOT AFFECTED
+    - When the explicit affected-version list does not decide the
+      device (an entry comparison is inconclusive, the list is
+      empty, or its entries are prose statements like "versions
+      prior to 21.4R2" that string comparison cannot decide), the
+      advisory's version constraints ("before:X" etc., as emitted by
+      Extract or derived locally from the prose) decide instead; a
+      definitive all-False list of decidable entries is a decision
+      and is never overridden by constraints.
+    - Affected-list items may carry a vendor prefix ("EOS 4.30.5M",
+      "Junos OS 21.2R1" - the shape live extraction returns); those
+      are decided via their version token (_prefixed_version_token).
+      Items with prose wording are never reduced to a token.
+    - Applicability conditions gate AFFECTED: a device that matches
+      product and version but whose advisory carries conditions the
+      inventory cannot confirm becomes CANNOT DETERMINE
+      (condition_gated=True), never AFFECTED.
+
+    `lang` localizes only the human-readable reason string; the
+    status values stay the English VERDICT_* constants.
     """
+    reasons = REASON_STRINGS[_normalize_lang(lang)]
     products = extracted.get("products") or []
     if isinstance(products, str):
         products = [products]
     affected_versions = extracted.get("affected_versions") or []
     if isinstance(affected_versions, str):
         affected_versions = [affected_versions]
+    constraints = _structured_constraints(extracted)
+    conditions = _structured_conditions(extracted)
 
     hostname = device.get("hostname", "")
     model = device.get("model", "")
     version = device.get("version", "")
 
     if not products:
-        return {
-            "hostname": hostname, "model": model, "version": version,
-            "candidate": False, "status": VERDICT_CANNOT,
-            "reason": "Advisory extraction named no product; cannot determine.",
-        }
+        return _row(hostname, model, version, False, VERDICT_CANNOT,
+                    reasons["no_product"])
 
     if not product_matches(model, products):
-        return {
-            "hostname": hostname, "model": model, "version": version,
-            "candidate": False, "status": VERDICT_NOT_AFFECTED,
-            "reason": "Device product is not one of the products named in the advisory.",
-        }
+        return _row(hostname, model, version, False,
+                    VERDICT_NOT_AFFECTED, reasons["different_product"])
 
     # Product matches from here on: this device is a candidate.
-    if not affected_versions:
-        return {
-            "hostname": hostname, "model": model, "version": version,
-            "candidate": True, "status": VERDICT_CANNOT,
-            "reason": "Product matches, but the advisory states no affected versions.",
-        }
+    if not affected_versions and not constraints:
+        return _row(hostname, model, version, True, VERDICT_CANNOT,
+                    reasons["no_affected_versions"])
 
     if parse_version(version) is None:
-        return {
-            "hostname": hostname, "model": model, "version": version,
-            "candidate": True, "status": VERDICT_CANNOT,
-            "reason": "Product matches, but the device version %r is unparseable." % version,
-        }
+        return _row(hostname, model, version, True, VERDICT_CANNOT,
+                    reasons["unparseable_version"] % version)
+
+    status = None  # type: Optional[str]
+    reason = None  # type: Optional[str]
 
     saw_unknown = False
+    decidable_entries = []  # type: List[Any]
     for entry in affected_versions:
+        if _is_decidable_list_entry(entry):
+            decidable_entries.append(entry)
+            continue
+        prefixed_token = _prefixed_version_token(entry)
+        if prefixed_token is not None:
+            # Vendor-prefixed plain version ("EOS 4.30.5M",
+            # "Junos OS 21.2R1" - the shape live extraction returns):
+            # decidable via its extracted version token.
+            decidable_entries.append(prefixed_token)
+        else:
+            # Prose entries ("Junos OS versions prior to 21.4R2")
+            # state a bound, not a version: string comparison cannot
+            # decide them, and counting one as a decided non-match
+            # would manufacture a false NOT AFFECTED. The derived
+            # constraints below speak for these entries instead.
+            saw_unknown = True
+    for entry in decidable_entries:
         result = version_matches(version, str(entry))
         if result is True:
-            return {
-                "hostname": hostname, "model": model, "version": version,
-                "candidate": True, "status": VERDICT_AFFECTED,
-                "reason": "Version %s is listed as affected (%s)." % (version, entry),
-            }
+            status = VERDICT_AFFECTED
+            reason = reasons["version_affected"] % (version, entry)
+            break
         if result is None:
             saw_unknown = True
+    if status is None and decidable_entries and not saw_unknown:
+        # Every decidable list entry was compared and none matched:
+        # the list decided. Constraints must not override a decided
+        # list.
+        status = VERDICT_NOT_AFFECTED
+        reason = reasons["version_not_affected"] % version
 
-    if saw_unknown:
-        return {
-            "hostname": hostname, "model": model, "version": version,
-            "candidate": True, "status": VERDICT_CANNOT,
-            "reason": "Product matches, but version comparison was inconclusive.",
-        }
+    if status is None and constraints:
+        # The list did not decide (inconclusive entry, or empty):
+        # fall back to the normalized prose constraints.
+        outcomes = [(constraint_matches(version, c), c)
+                    for c in constraints]
+        matched = [c for outcome, c in outcomes if outcome is True]
+        if matched:
+            status = VERDICT_AFFECTED
+            reason = _constraint_reason(reasons, matched[0], version)
+        elif any(outcome is None for outcome, _c in outcomes):
+            status = VERDICT_CANNOT
+            reason = reasons["version_inconclusive"]
+        else:
+            status = VERDICT_NOT_AFFECTED
+            reason = reasons["version_constraint_not_satisfied"] % version
 
-    return {
-        "hostname": hostname, "model": model, "version": version,
-        "candidate": True, "status": VERDICT_NOT_AFFECTED,
-        "reason": "Product matches, but version %s is not in the affected list." % version,
-    }
+    if status is None:
+        if saw_unknown:
+            status = VERDICT_CANNOT
+            reason = reasons["version_inconclusive"]
+        else:
+            status = VERDICT_CANNOT
+            reason = reasons["no_affected_versions"]
+
+    if status == VERDICT_AFFECTED and conditions:
+        # Applicability gate: matching product and version is not
+        # enough when the advisory only applies under conditions the
+        # inventory does not speak to (Arista 0201 pattern).
+        condition_text = "; ".join(c["text"] for c in conditions)
+        return _row(hostname, model, version, True, VERDICT_CANNOT,
+                    reasons["condition_gate"] % condition_text,
+                    condition_gated=True)
+
+    return _row(hostname, model, version, True, status, reason or "")
 
 
-def match_inventory(devices, extracted):
-    # type: (List[Dict[str, str]], Dict[str, Any]) -> List[Dict[str, Any]]
-    return [match_device(device, extracted) for device in devices]
+def match_inventory(devices, extracted, lang="en"):
+    # type: (List[Dict[str, str]], Dict[str, Any], str) -> List[Dict[str, Any]]
+    return [match_device(device, extracted, lang=lang) for device in devices]
 
 
 def base_verdict(device_results):
@@ -272,6 +809,49 @@ def base_verdict(device_results):
 # Defensive parsing of Clocked responses
 # --------------------------------------------------------------------------
 
+def _item_plain_value(item):
+    # type: (Any) -> Any
+    """Plain value of one list-field item (wrapped dict or plain)."""
+    if isinstance(item, dict) and "value" in item:
+        return item.get("value")
+    return item
+
+
+def _plain_field_value(entry):
+    # type: (Any) -> Any
+    """Plain value of one raw extract field.
+
+    The field-level "value" is authoritative when it carries data,
+    but the live API sometimes leaves it empty (or holds still-
+    wrapped item dicts) while the extracted spans live only in the
+    "items" array - observed live for applicability_conditions,
+    whose multi-line span never reached the plain fields when only
+    "value" was consulted. Fall back to the items in that case so a
+    returned extraction is never silently dropped.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    if "value" not in entry and "items" not in entry:
+        return entry
+    items = entry.get("items")
+    item_values = []  # type: List[Any]
+    if isinstance(items, list):
+        item_values = [_item_plain_value(item) for item in items]
+    value = entry.get("value")
+    if isinstance(value, list):
+        plain_items = [_item_plain_value(item) for item in value]
+        if plain_items:
+            return plain_items
+        return item_values
+    if value is None:
+        if item_values:
+            return item_values
+        return None
+    if isinstance(value, dict) and "value" in value:
+        return value.get("value")
+    return value
+
+
 def unwrap_extract_fields(fields):
     # type: (Any) -> Dict[str, Any]
     """Unwrap Clocked extract fields to plain values.
@@ -281,7 +861,7 @@ def unwrap_extract_fields(fields):
      "confidence": ..., "p_verify": ...} (list fields also carry
     "items": [{value, start, end, confidence}, ...]).
     Internal code (matcher, claim builder, UI) works on the plain
-    "value" only; the raw object stays available via extract_raw.
+    values only; the raw object stays available via extract_raw.
     Plain (already-unwrapped) values pass through unchanged, so live
     and mock responses share this one unwrap path.
     """
@@ -289,10 +869,7 @@ def unwrap_extract_fields(fields):
     if not isinstance(fields, dict):
         return plain
     for name, entry in fields.items():
-        if isinstance(entry, dict) and "value" in entry:
-            plain[name] = entry.get("value")
-        else:
-            plain[name] = entry
+        plain[name] = _plain_field_value(entry)
     return plain
 
 
@@ -311,6 +888,160 @@ def unwrap_extract_result(extract_result):
         else:
             raw_fields = extract_result
     return unwrap_extract_fields(raw_fields), raw_fields
+
+
+def _item_confidence(raw_field, index, fallback=None):
+    # type: (Any, int, Optional[float]) -> Optional[float]
+    """Best per-item confidence from a raw (wrapped) extract field."""
+    if isinstance(raw_field, dict):
+        items = raw_field.get("items")
+        if isinstance(items, list) and 0 <= index < len(items):
+            item = items[index]
+            if isinstance(item, dict):
+                conf = item.get("confidence")
+                if isinstance(conf, (int, float)):
+                    return float(conf)
+        conf = raw_field.get("confidence")
+        if isinstance(conf, (int, float)):
+            return float(conf)
+    return fallback
+
+
+def _structured_constraints(extracted):
+    # type: (Dict[str, Any]) -> List[Dict[str, Any]]
+    """Structured version constraints from an extracted dict.
+
+    Accepts both the normalized form (dicts with a "relation") and
+    raw normalized strings ("before:21.4R2"), so the matcher works
+    whether or not normalize_extraction has run.
+    """
+    raw = (extracted or {}).get("version_constraints") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    structured = []  # type: List[Dict[str, Any]]
+    for item in raw:
+        if isinstance(item, dict) and item.get("relation"):
+            structured.append(item)
+        elif isinstance(item, str):
+            parsed = parse_version_constraint(item)
+            if parsed is not None:
+                structured.append(parsed)
+    return structured
+
+
+def _structured_conditions(extracted):
+    # type: (Dict[str, Any]) -> List[Dict[str, Any]]
+    """Applicability conditions as [{"text": ..., "confidence": ...}].
+
+    Reads the normalized "conditions" key first, then the raw
+    extracted "applicability_conditions" list of plain strings.
+    """
+    raw = (extracted or {}).get("conditions")
+    if not raw:
+        raw = (extracted or {}).get("applicability_conditions") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    conditions = []  # type: List[Dict[str, Any]]
+    for item in raw:
+        if isinstance(item, dict) and item.get("text"):
+            conditions.append({"text": str(item.get("text")),
+                               "confidence": item.get("confidence")})
+        elif isinstance(item, dict) and isinstance(item.get("value"), str) \
+                and item.get("value", "").strip():
+            # Still-wrapped item dict that survived unwrapping.
+            conditions.append({"text": item["value"],
+                               "confidence": item.get("confidence")})
+        elif isinstance(item, str) and item.strip():
+            conditions.append({"text": item, "confidence": None})
+    return conditions
+
+
+def normalize_extraction(extracted, raw_fields=None):
+    # type: (Dict[str, Any], Optional[Dict[str, Any]]) -> Dict[str, Any]
+    """Return a copy of plain extracted fields in canonical form.
+
+    - "version_constraints": [{"relation", "version",
+      "train" (train_before only), "confidence"}] parsed from the
+      normalized strings Extract emitted (unparseable strings are
+      dropped - they must never influence a verdict), MERGED with
+      constraints derived locally from the prose affected-version
+      statements (derive_version_constraints). Dedupe is by
+      (relation, version, train); explicit entries win and keep
+      their extractor confidence, derived ones carry None.
+    - "conditions": [{"text", "confidence"}] from the extracted
+      "applicability_conditions" strings (the plain strings stay
+      under "applicability_conditions" for display).
+    Absent source fields normalize to empty lists (backward
+    compatible with advisories that state neither).
+    """
+    normalized = dict(extracted or {})
+    raw_fields = raw_fields or {}
+
+    plain_constraints = normalized.get("version_constraints") or []
+    if isinstance(plain_constraints, str):
+        plain_constraints = [plain_constraints]
+    raw_constraints = raw_fields.get("version_constraints")
+    structured = []  # type: List[Dict[str, Any]]
+    seen_keys = set()  # type: set
+    for index, item in enumerate(plain_constraints):
+        if isinstance(item, dict) and item.get("relation"):
+            entry = dict(item)
+        elif isinstance(item, dict) \
+                and isinstance(item.get("value"), str):
+            # Still-wrapped item dict that survived unwrapping.
+            parsed_constraint = parse_version_constraint(item["value"])
+            if parsed_constraint is None:
+                continue
+            entry = dict(parsed_constraint)
+        elif isinstance(item, str):
+            parsed_constraint = parse_version_constraint(item)
+            if parsed_constraint is None:
+                continue
+            entry = dict(parsed_constraint)
+        else:
+            continue
+        entry["confidence"] = _item_confidence(
+            raw_constraints, index, entry.get("confidence"))
+        seen_keys.add((entry.get("relation"), entry.get("version"),
+                       entry.get("train")))
+        structured.append(entry)
+    for derived_entry in derive_version_constraints(
+            normalized.get("affected_versions"),
+            normalized.get("fixed_version")):
+        key = (derived_entry["relation"], derived_entry["version"],
+               derived_entry.get("train"))
+        if key not in seen_keys:
+            seen_keys.add(key)
+            structured.append(derived_entry)
+    normalized["version_constraints"] = structured
+
+    plain_conditions = normalized.get("applicability_conditions")
+    if plain_conditions is None:
+        plain_conditions = normalized.get("conditions") or []
+    if isinstance(plain_conditions, str):
+        plain_conditions = [plain_conditions]
+    raw_conditions = raw_fields.get("applicability_conditions")
+    conditions = []  # type: List[Dict[str, Any]]
+    for index, item in enumerate(plain_conditions):
+        if isinstance(item, dict) and item.get("text"):
+            entry = {"text": str(item.get("text"))}
+            fallback = item.get("confidence")
+        elif isinstance(item, dict) \
+                and isinstance(item.get("value"), str) \
+                and item.get("value", "").strip():
+            # Still-wrapped item dict that survived unwrapping.
+            entry = {"text": item["value"]}
+            fallback = item.get("confidence")
+        elif isinstance(item, str) and item.strip():
+            entry = {"text": item}
+            fallback = None
+        else:
+            continue
+        entry["confidence"] = _item_confidence(
+            raw_conditions, index, fallback)
+        conditions.append(entry)
+    normalized["conditions"] = conditions
+    return normalized
 
 
 def _as_bool_probability(answer_obj):
@@ -442,11 +1173,20 @@ def parse_grounding(grounding_result):
 # Verdict composition (pure, testable offline)
 # --------------------------------------------------------------------------
 
-def compose_verdict(device_results, decide_parsed, grounding_parsed):
-    # type: (List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]) -> Dict[str, Any]
+def compose_verdict(device_results, decide_parsed, grounding_parsed,
+                    lang="en", conditions=None):
+    # type: (List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, Optional[List[str]]) -> Dict[str, Any]
+    warnings_text = WARNING_STRINGS[_normalize_lang(lang)]
     verdict = base_verdict(device_results)
     warnings = []  # type: List[str]
     urgency = str(decide_parsed.get("urgency") or "monitor")
+
+    if conditions:
+        # The condition gate lives in the matcher (it applies
+        # regardless of Decide's evidence probability); composition
+        # only surfaces what has to be checked.
+        warnings.append(
+            warnings_text["condition_check"] % "; ".join(conditions))
 
     evidence = decide_parsed.get("evidence_sufficient") or {}
     evidence_prob = evidence.get("probability")
@@ -459,8 +1199,7 @@ def compose_verdict(device_results, decide_parsed, grounding_parsed):
     if low_sufficiency:
         verdict = VERDICT_CANNOT
         warnings.append(
-            "CANNOT DETERMINE: Decide rated the advisory evidence as "
-            "insufficient (probability %s)." % (
+            warnings_text["low_sufficiency"] % (
                 "unknown" if evidence_prob is None
                 else "%.4g" % float(evidence_prob))
         )
@@ -468,14 +1207,21 @@ def compose_verdict(device_results, decide_parsed, grounding_parsed):
     if not grounding_parsed.get("supported"):
         verdict = VERDICT_CANNOT
         warnings.append(
-            "CANNOT DETERMINE: Verify (grounding) did not verify the "
-            "verdict claim against the advisory and inventory texts "
-            "(verdict=%r, answers_question=%r)." % (
+            warnings_text["grounding"] % (
                 grounding_parsed.get("verdict"),
                 grounding_parsed.get("answers_question"))
         )
 
     return {"verdict": verdict, "urgency": urgency, "warnings": warnings}
+
+
+def _products_text(extracted):
+    # type: (Dict[str, Any]) -> str
+    raw_products = extracted.get("products") or []
+    if isinstance(raw_products, str):
+        return raw_products
+    # Plain (unwrapped) representation: a list of product names.
+    return ", ".join(str(p) for p in raw_products)
 
 
 def build_claim(verdict, device_results, extracted):
@@ -488,54 +1234,149 @@ def build_claim(verdict, device_results, extracted):
                 % (advisory_id, first.get("model"), first.get("hostname"),
                    first.get("version")))
     if verdict == VERDICT_NOT_AFFECTED:
-        raw_products = extracted.get("products") or []
-        if isinstance(raw_products, str):
-            products = raw_products
-        else:
-            # Plain (unwrapped) representation: a list of product names.
-            products = ", ".join(str(p) for p in raw_products)
-        products = products or "the named products"
+        products = _products_text(extracted) or "the named products"
         return ("No device in the inventory is affected: the advisory covers %s, "
                 "and no inventoried device runs an affected version." % products)
+    if verdict == VERDICT_CANNOT:
+        # Condition-gated case: state BOTH the product/version match
+        # and the unconfirmed condition, so Verify can check the
+        # claim against the advisory + inventory documents.
+        conditions = _structured_conditions(extracted)
+        gated = [r for r in device_results if r.get("condition_gated")]
+        if conditions and gated:
+            first = gated[0]
+            condition_text = "; ".join(c["text"] for c in conditions)
+            return (
+                "%s covers %s; %s (%s, version %s) matches the affected "
+                "product and version, but the advisory applies only "
+                "when: %s. The inventory does not state whether this "
+                "condition holds, so affectedness cannot be determined."
+                % (advisory_id, _products_text(extracted),
+                   first.get("model"), first.get("hostname"),
+                   first.get("version"), condition_text))
     return ("The available advisory information is insufficient to determine "
             "whether any inventoried device is affected by %s." % advisory_id)
 
 
-def generate_checklist(verdict, urgency):
-    # type: (str, str) -> List[str]
-    if verdict == VERDICT_AFFECTED:
-        if urgency == "immediate":
-            return [
-                "Open an urgent change/incident record for the affected device(s) today.",
-                "Restrict management access to trusted networks as an interim workaround.",
-                "Schedule installation of the fixed version before the advisory deadline.",
-                "Snapshot configs and verify backups before upgrading.",
-                "Re-run this triage after the upgrade to confirm the verdict clears.",
-            ]
-        if urgency == "planned":
-            return [
-                "Open a planned change record for the affected device(s).",
-                "Schedule the fixed-version upgrade inside the next maintenance window.",
-                "Verify config backups before the change window.",
-                "Re-run this triage after the upgrade to confirm the verdict clears.",
-            ]
-        return [
+CHECKLIST_STRINGS = {
+    "en": {
+        "affected_immediate": [
+            "Open an urgent change/incident record for the affected device(s) today.",
+            "Restrict management access to trusted networks as an interim workaround.",
+            "Schedule installation of the fixed version before the advisory deadline.",
+            "Snapshot configs and verify backups before upgrading.",
+            "Re-run this triage after the upgrade to confirm the verdict clears.",
+        ],
+        "affected_planned": [
+            "Open a planned change record for the affected device(s).",
+            "Schedule the fixed-version upgrade inside the next maintenance window.",
+            "Verify config backups before the change window.",
+            "Re-run this triage after the upgrade to confirm the verdict clears.",
+        ],
+        "affected_monitor": [
             "Record the affected device(s) on the watch list.",
             "Plan the fixed-version upgrade in a routine maintenance window.",
             "Re-check the advisory for updates before the deadline.",
-        ]
-    if verdict == VERDICT_NOT_AFFECTED:
-        return [
+        ],
+        "not_affected": [
             "File this triage result with the advisory for audit evidence.",
             "No device change is required for this advisory.",
             "Re-run if the inventory changes or the advisory is revised.",
-        ]
-    return [
-        "Do NOT treat this as 'not affected' - the evidence is insufficient.",
-        "Obtain the authoritative advisory with affected and fixed versions.",
-        "Confirm the exact OS version of every candidate device.",
-        "Re-run this triage once complete version information is available.",
-    ]
+        ],
+        "cannot_determine": [
+            "Do NOT treat this as 'not affected' - the evidence is insufficient.",
+            "Obtain the authoritative advisory with affected and fixed versions.",
+            "Confirm the exact OS version of every candidate device.",
+            "Re-run this triage once complete version information is available.",
+        ],
+    },
+    "ko": {
+        "affected_immediate": [
+            "오늘 안에 영향받는 장비에 대한 긴급 변경/장애 대응 기록을 여세요.",
+            "임시 조치로 관리 접근을 신뢰할 수 있는 네트워크로 제한하세요.",
+            "권고문 기한 전에 수정 버전을 설치할 일정을 잡으세요.",
+            "업그레이드 전에 설정을 백업하고 백업이 정상인지 확인하세요.",
+            "업그레이드 후 이 판정을 다시 실행해 판정이 해소됐는지 확인하세요.",
+        ],
+        "affected_planned": [
+            "영향받는 장비에 대한 계획 변경 기록을 여세요.",
+            "다음 정기 점검 시간 안에 수정 버전 업그레이드를 일정에 넣으세요.",
+            "변경 작업 전에 설정 백업을 확인하세요.",
+            "업그레이드 후 이 판정을 다시 실행해 판정이 해소됐는지 확인하세요.",
+        ],
+        "affected_monitor": [
+            "영향받는 장비를 주시 목록에 등록하세요.",
+            "정기 점검 시간에 수정 버전 업그레이드를 계획하세요.",
+            "기한 전에 권고문이 업데이트됐는지 다시 확인하세요.",
+        ],
+        "not_affected": [
+            "이 판정 결과를 권고문과 함께 감사 근거로 보관하세요.",
+            "이 권고문으로는 장비 변경이 필요하지 않습니다.",
+            "인벤토리가 바뀌거나 권고문이 개정되면 다시 실행하세요.",
+        ],
+        "cannot_determine": [
+            "이 결과를 '해당 없음'으로 취급하지 마세요 - 근거가 충분하지 않습니다.",
+            "영향받는 버전과 수정 버전이 명시된 공식 권고문을 확보하세요.",
+            "후보 장비 전체의 정확한 OS 버전을 확인하세요.",
+            "버전 정보가 완비되면 이 판정을 다시 실행하세요.",
+        ],
+    },
+}
+
+
+CONDITION_CHECK_STRINGS = {
+    "en": {
+        "generic": (
+            "Verify whether this condition holds on each candidate "
+            "device: %s"
+        ),
+        "terminattr": (
+            "On each matched device, check the running configuration "
+            "for TerminAttr / CloudVision (CVP) configuration (e.g. "
+            "'show running-config | include TerminAttr')."
+        ),
+    },
+    "ko": {
+        "generic": "후보 장비 각각에서 다음 조건이 충족되는지 확인하세요: %s",
+        "terminattr": (
+            "후보 장비 각각의 실행 설정에서 TerminAttr / CloudVision(CVP) "
+            "설정을 확인하세요 (예: 'show running-config | "
+            "include TerminAttr')."
+        ),
+    },
+}
+
+
+def _condition_check_steps(conditions, lang):
+    # type: (List[str], str) -> List[str]
+    strings = CONDITION_CHECK_STRINGS[_normalize_lang(lang)]
+    steps = []  # type: List[str]
+    for condition in conditions:
+        if "terminattr" in str(condition).lower():
+            steps.append(strings["terminattr"])
+        else:
+            steps.append(strings["generic"] % condition)
+    return steps
+
+
+def generate_checklist(verdict, urgency, lang="en", conditions=None):
+    # type: (str, str, str, Optional[List[str]]) -> List[str]
+    checklists = CHECKLIST_STRINGS[_normalize_lang(lang)]
+    if verdict == VERDICT_AFFECTED:
+        if urgency == "immediate":
+            return list(checklists["affected_immediate"])
+        if urgency == "planned":
+            return list(checklists["affected_planned"])
+        return list(checklists["affected_monitor"])
+    if verdict == VERDICT_NOT_AFFECTED:
+        return list(checklists["not_affected"])
+    items = list(checklists["cannot_determine"])
+    if conditions:
+        # Condition-gated cannot-determine: the fastest path to a
+        # firm verdict is verifying each condition, so those steps
+        # go first.
+        return _condition_check_steps(conditions, lang) + items
+    return items
 
 
 # --------------------------------------------------------------------------
@@ -558,6 +1399,10 @@ def detect_sample_id(advisory_text, sample_id=None):
         "SYN-CSC-2026-1101": "sample1",
         "SYN-JUN-2026-1102": "sample2",
         "SYN-KISA-2026-1103": "sample3",
+        "SYN-ARS-2026-1104": "sample4",
+        "SYN-JUN-2026-1105": "sample5",
+        "SYN-JUN-2026-1106": "sample6",
+        "SYN-ARS-2026-1107": "sample7",
     }
     for marker, sid in markers.items():
         if marker in text:
@@ -568,6 +1413,10 @@ def detect_sample_id(advisory_text, sample_id=None):
         "sample1_affected.txt": "sample1",
         "sample2_not_affected.txt": "sample2",
         "sample3_insufficient.txt": "sample3",
+        "sample4_arista_affected.txt": "sample4",
+        "sample5_juniper_affected.txt": "sample5",
+        "sample6_juniper_prior_to.txt": "sample6",
+        "sample7_arista_conditional.txt": "sample7",
     }
     for filename, sid in file_map.items():
         path = samples_dir / filename
@@ -613,20 +1462,69 @@ def _make_client(api_key):
             return Clocked(api_key=api_key)
 
 
+# The applicability_conditions field definition is shared verbatim
+# by the main extract call and the focused conditions-only call:
+# identical description text, so both passes ask for the same thing.
+_CONDITIONS_FIELD = {
+    "description": (
+        "Conditions that must hold for the advisory to apply, "
+        "beyond product and version - for example a feature "
+        "or configuration that must be enabled - quoted or "
+        "closely paraphrased from the advisory. Empty when "
+        "the advisory applies to the listed products and "
+        "versions unconditionally."
+    ),
+    "list": True,
+}
+
+
+def _condition_strings(plain_fields):
+    # type: (Dict[str, Any]) -> List[str]
+    """Non-empty condition strings from plain (unwrapped) fields."""
+    value = plain_fields.get("applicability_conditions")
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value
+            if isinstance(v, str) and v.strip()]
+
+
 def _live_extract(client, advisory_text):
     # type: (Any, str) -> Tuple[Dict[str, Any], Dict[str, Any]]
-    """Return (plain fields, raw fields) via the shared unwrap path."""
+    """Return (plain fields, raw fields) via the shared unwrap path.
+
+    Two Extract calls: the main field set, then a FOCUSED call whose
+    only field is applicability_conditions. Measured live, span
+    extraction reliability drops as the field count grows: inside
+    the full call the conditions field came back empty even when
+    the condition sentence was plainly in the text, while the
+    focused call returned it reliably. The focused result wins when
+    it carries conditions; otherwise the main call's value stands
+    (both raw and plain are swapped together, so per-item
+    confidences stay attached to the winning field).
+
+    The schema deliberately does NOT request a version_constraints
+    field: a normalized token ("before:21.4R2") is not a text span,
+    so the span extractor never emits one - that field was dead
+    weight live. Local derivation from the verbatim prose owns
+    constraints (see derive_version_constraints); the parser still
+    tolerates the field when a response carries it.
+    """
     result = client.extract(
         text=advisory_text,
         instructions=(
             "Extract the fields verbatim from this network security advisory. "
             "Do not infer values that are not stated; leave a field empty "
-            "when the advisory does not state it."
+            "when the advisory does not state it. "
+            "applicability_conditions is a restatement of what the "
+            "advisory states, per its field description."
         ),
         fields={
             "vendor": "Vendor or issuing organisation named in the advisory",
             "products": {"description": "Product names or models affected", "list": True},
             "affected_versions": {"description": "Software versions listed as affected", "list": True},
+            "applicability_conditions": _CONDITIONS_FIELD,
             "advisory_id": "Advisory identifier",
             "cve_id": "CVE identifier, if any",
             "severity": "Severity rating as stated",
@@ -636,7 +1534,29 @@ def _live_extract(client, advisory_text):
     )
     # Real fields are value-wrapped objects; unwrap to plain values
     # here (shared with Mock Mode) and keep the raw objects separate.
-    return unwrap_extract_result(result)
+    plain, raw = unwrap_extract_result(result)
+
+    focused = client.extract(
+        text=advisory_text,
+        instructions=(
+            "Extract ONLY the applicability conditions from this network "
+            "security advisory: conditions that must hold for the advisory "
+            "to apply, beyond product and version. Do not infer "
+            "conditions that are not stated; leave the field empty when "
+            "the advisory applies to the listed products and versions "
+            "unconditionally."
+        ),
+        fields={"applicability_conditions": _CONDITIONS_FIELD},
+    )
+    focused_plain, focused_raw = unwrap_extract_result(focused)
+    if _condition_strings(focused_plain):
+        plain["applicability_conditions"] = focused_plain.get(
+            "applicability_conditions")
+        if "applicability_conditions" in focused_raw:
+            raw = dict(raw)
+            raw["applicability_conditions"] = focused_raw[
+                "applicability_conditions"]
+    return plain, raw
 
 
 def _live_decide(client, advisory_text, extracted, device_results):
@@ -704,9 +1624,17 @@ def _live_grounding(client, advisory_text, inventory_text, claim):
 # Orchestration
 # --------------------------------------------------------------------------
 
-def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None):
-    # type: (str, str, Optional[str], Optional[str]) -> Dict[str, Any]
-    """Run the full pipeline. Returns a result dict for the UI / tests."""
+def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
+               lang="en"):
+    # type: (str, str, Optional[str], Optional[str], str) -> Dict[str, Any]
+    """Run the full pipeline. Returns a result dict for the UI / tests.
+
+    `lang` ("en" default, or "ko") localizes display text only:
+    per-device reasons, warnings, the checklist, and the Mock Mode
+    notice. Verdict constants, the grounding claim, and every Clocked
+    prompt stay English.
+    """
+    lang = _normalize_lang(lang)
     devices = parse_inventory(inventory_text)
     key = _get_api_key(api_key)
     mode = "live" if key else "mock"
@@ -716,12 +1644,7 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None):
         if detected is None:
             return {
                 "mode": mode,
-                "error": (
-                    "Mock Mode: no CLOCKED_API_KEY is configured, so live "
-                    "analysis is unavailable. Use one of the bundled samples "
-                    "for the demo, or set CLOCKED_API_KEY for live analysis "
-                    "of arbitrary text."
-                ),
+                "error": MOCK_ERROR_STRINGS[lang],
                 "verdict": None,
                 "devices": devices,
             }
@@ -730,17 +1653,23 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None):
         # Mock responses use the real wrapped shapes; the same shared
         # unwrap path as live mode turns them into plain values.
         extracted, _mock_raw_fields = unwrap_extract_result(extract_result)
+        extracted = normalize_extraction(extracted, _mock_raw_fields)
         decide_result = canned.get("decide") or {}
         grounding_result = canned.get("grounding") or {}
         used_sample = detected
     else:
         client = _make_client(str(key))
         extracted, extract_raw_fields = _live_extract(client, advisory_text)
+        extracted = normalize_extraction(extracted, extract_raw_fields)
         decide_result = {}
         grounding_result = {}
         used_sample = None
-        # Matcher runs between extract and decide in live mode too;
-        # device_results is computed below before decide is called.
+        # Matcher runs between extract and decide in live mode too.
+        # The copy fed to Decide (and used for the grounding claim)
+        # is always English, so API inputs never depend on `lang`;
+        # a second, localized copy is produced for display only.
+        # Matching is local and deterministic, so this costs no
+        # Clocked calls and both copies always agree on status.
         device_results_live = match_inventory(devices, extracted)
         decide_result = _live_decide(client, advisory_text, extracted,
                                      device_results_live)
@@ -750,10 +1679,17 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None):
         grounding_result = _live_grounding(
             client, advisory_text, inventory_text, claim_live)
         # Reuse the shared composition path below.
-        device_results = device_results_live
+        if lang == "en":
+            device_results = device_results_live
+        else:
+            device_results = match_inventory(devices, extracted, lang=lang)
         decide_parsed = decide_parsed_live
         grounding_parsed = parse_grounding(grounding_result)
-        composed = compose_verdict(device_results, decide_parsed, grounding_parsed)
+        condition_texts = [c["text"]
+                           for c in extracted.get("conditions") or []]
+        composed = compose_verdict(device_results, decide_parsed,
+                                   grounding_parsed, lang=lang,
+                                   conditions=condition_texts)
         final_verdict = composed["verdict"]
         claim = build_claim(final_verdict, device_results, extracted)
         return {
@@ -769,16 +1705,24 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None):
             "verdict": final_verdict,
             "urgency": composed["urgency"],
             "warnings": composed["warnings"],
+            "conditions": condition_texts,
             "claim": claim,
-            "checklist": generate_checklist(final_verdict, composed["urgency"]),
-            "clocked_calls": 3,
+            "checklist": generate_checklist(final_verdict,
+                                            composed["urgency"],
+                                            lang=lang,
+                                            conditions=condition_texts),
+            "clocked_calls": 4,
         }
 
     # Mock path composition (shared logic with live path).
-    device_results = match_inventory(devices, extracted)
+    device_results = match_inventory(devices, extracted, lang=lang)
     decide_parsed = parse_decide(decide_result)
     grounding_parsed = parse_grounding(grounding_result)
-    composed = compose_verdict(device_results, decide_parsed, grounding_parsed)
+    condition_texts = [c["text"]
+                       for c in extracted.get("conditions") or []]
+    composed = compose_verdict(device_results, decide_parsed,
+                               grounding_parsed, lang=lang,
+                               conditions=condition_texts)
     final_verdict = composed["verdict"]
     claim = build_claim(final_verdict, device_results, extracted)
     return {
@@ -794,7 +1738,10 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None):
         "verdict": final_verdict,
         "urgency": composed["urgency"],
         "warnings": composed["warnings"],
+        "conditions": condition_texts,
         "claim": claim,
-        "checklist": generate_checklist(final_verdict, composed["urgency"]),
-        "clocked_calls": 3,
+        "checklist": generate_checklist(final_verdict,
+                                        composed["urgency"], lang=lang,
+                                        conditions=condition_texts),
+        "clocked_calls": 4,
     }

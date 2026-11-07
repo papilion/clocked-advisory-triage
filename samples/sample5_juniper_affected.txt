@@ -1,0 +1,22 @@
+SYNTHETIC SAMPLE ADVISORY - FOR DEMONSTRATION ONLY
+
+Advisory ID: SYN-JUN-2026-1105
+CVE-style reference: CVE-2026-90005 (synthetic)
+
+Vendor: Juniper-style Networks (synthetic sample)
+Product: QFX5110 Series Switches
+Affected software: Junos OS 21.2R1, 21.2R2, 21.2R3
+Severity: High
+
+Description:
+A synthetic flaw in the sample packet forwarding engine could allow an
+unauthenticated remote sender to cause a denial of service on the
+affected device. This text is invented for demonstration and does not
+describe a real product defect.
+
+Fixed software: Junos OS 21.2R4 or later.
+Action deadline: Apply the fixed software or an approved workaround
+before 2026-11-28.
+
+Workaround: Apply standard control-plane and management-plane filtering
+until fixed software is installed.
