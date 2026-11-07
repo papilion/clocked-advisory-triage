@@ -1,0 +1,101 @@
+{
+ "resultsPerPage": 3,
+ "startIndex": 0,
+ "totalResults": 3,
+ "format": "NVD_CVE",
+ "version": "2.0",
+ "vulnerabilities": [
+  {
+   "cve": {
+    "id": "CVE-2023-20198",
+    "published": "2023-10-16T16:15:10.023",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Cisco is providing an update for the ongoing investigation into observed exploitation of the web UI feature in Cisco IOS XE Software. We are updating the list of fixed releases and adding the Software Checker. Our investigation has determined that the actors exploited two previously unknown issues. The attacker first exploited CVE-2023-20198 to gain initial access and issued a privilege 15 command to create a local user and password combination. This allowed the user to log in with normal user access. The attacker then exploited another component of the web UI feature, leveraging the new local user to elevate privilege to root and write the implant to the file system. Cisco has assigned CVE-2023-20273 to this issue. CVE-2023-20198 has been assigned a CVSS Score of 10.0. CVE-2023-20273 has been assigned a CVSS Score of 7.2. Both of these CVEs are being tracked by CSCwh87343."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "psirt@cisco.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "baseScore": 10.0,
+        "baseSeverity": "CRITICAL"
+       }
+      }
+     ]
+    },
+    "references": [
+     {
+      "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-iosxe-webui-privesc-j22SaA4z",
+      "source": "psirt@cisco.com"
+     },
+     {
+      "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-iosxe-webui-privesc-j22SaA4z",
+      "source": "af854a3a-2127-422b-91ae-364da2661108"
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2023-36844",
+    "published": "2023-08-17T20:15:10.267",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "A PHP External Variable Modification vulnerability in J-Web of Juniper Networks Junos OS on EX Series allows an unauthenticated, network-based attacker to control certain, important environment variables.\n\nUsing a crafted request an attacker is able to modify \n\ncertain PHP environment variables leading to partial loss of integrity, which may allow chaining to other vulnerabilities.\nThis issue affects Juniper Networks Junos OS on EX Series:\n\n\n\n  *  All versions prior to 20.4R3-S9;\n  *  21.1 versions 21.1R1 and later;\n  *  21.2 versions prior to 21.2R3-S7;\n  *  21.3 versions \n\nprior to \n\n 21.3R3-S5;\n  *  21.4 versions \n\nprior to \n\n21.4R3-S5;\n  *  22.1 versions \n\nprior to \n\n22.1R3-S4;\n  *  22.2 versions \n\nprior to \n\n22.2R3-S2;\n  *  22.3 versions \n\nprior to 22.3R3-S1;\n  *  22.4 versions \n\nprior to \n\n22.4R2-S2, 22.4R3;\n  *  23.2 versions prior to \n\n23.2R1-S1, 23.2R2."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "sirt@juniper.net",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "baseScore": 5.3,
+        "baseSeverity": "MEDIUM"
+       }
+      }
+     ]
+    },
+    "references": [
+     {
+      "url": "http://packetstormsecurity.com/files/174865/Juniper-SRX-Firewall-EX-Switch-Remote-Code-Execution.html",
+      "source": "sirt@juniper.net"
+     },
+     {
+      "url": "https://supportportal.juniper.net/JSA72300",
+      "source": "sirt@juniper.net"
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2016-6894",
+    "published": "2017-01-04T21:59:00.137",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Arista EOS 4.15 before 4.15.8M, 4.16 before 4.16.7M, and 4.17 before 4.17.0F on DCS-7050 series devices allow remote attackers to cause a denial of service (device reboot) by sending crafted packets to the control plane."
+     }
+    ],
+    "references": [
+     {
+      "url": "http://www.securityfocus.com/bid/95267",
+      "source": "cve@mitre.org"
+     },
+     {
+      "url": "https://www.arista.com/en/support/advisories-notices/security-advisories/1752-security-advisory-25",
+      "source": "cve@mitre.org"
+     }
+    ]
+   }
+  }
+ ]
+}

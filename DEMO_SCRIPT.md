@@ -31,6 +31,15 @@ guessed "not affected".
   "no links found" / "blocked" and points at Link list mode rather
   than faking a harvest. Worth one line if it comes up; the GitHub
   preset is the reliable on-stage path.
+- If a judge asks "so how do I feed it real vendor data?": switch
+  the source to **Vulnerability feeds (NVD / KEV)** and Run — the
+  app queries the official NVD API and the CISA KEV catalog for
+  the inventory's vendors (in Mock Mode it reads bundled real-data
+  fixtures and reports "NVD: 3 CVEs collected · KEV: 3 matches").
+- Or switch to **Upload advisory files**: advisories saved from
+  your own browser (where the portals let you in) are judged
+  exactly like fetched pages — the browser collects, the app
+  judges.
 - Live runs make a second, focused Extract call for applicability
   conditions and workarounds: inside the full-field call those
   fields kept coming back empty even when the sentences were

@@ -95,7 +95,7 @@ The key is never stored in this repository.
 The default screen is built for the real triage pile, not for
 copy-pasting:
 
-1. **Advisory source** — two ways in:
+1. **Advisory source** — four ways in:
    - **Listing page (auto-collect)** — give one vendor listing/board
      URL (preset buttons for Cisco PSIRT, Arista, Juniper, and the
      bundled GitHub samples) and the app harvests the advisory
@@ -112,6 +112,29 @@ copy-pasting:
      through) and runs the full pipeline per link. One bad link
      never aborts the batch — it shows up as a `FETCH FAILED` row
      with the reason.
+   - **Vulnerability feeds (NVD / KEV)** — skip the portals
+     entirely and query the official machine-readable feeds
+     instead: the **NVD CVE API** (one keyword query per vendor
+     actually present in your inventory — e.g. "Cisco IOS XE",
+     "Juniper Junos", "Arista EOS" — no API key needed) and CISA's
+     **Known Exploited Vulnerabilities** catalog (filtered locally
+     to your vendors and model families). Why: measured live, the
+     vendor portals block automated collection (Arista serves a
+     bot challenge; Cisco/Juniper listings are JavaScript shells),
+     while NVD and KEV are published precisely so machines can read
+     them. Each CVE becomes an advisory text (the NVD description
+     carries the affected-version prose; KEV's due date flows into
+     the Action block as the deadline) and is judged by the same
+     pipeline. Per-feed counts and honest empty/failed statuses are
+     shown after the run. In Mock Mode this source reads bundled
+     fixture files (real public CVE/KEV data, trimmed) instead of
+     the network, so the demo works offline.
+   - **Upload advisory files** — when a portal blocks the app but
+     not you, save the advisory pages from your own browser and
+     upload them (`.txt`, `.html`, `.htm`, `.md`, up to 10 files):
+     your browser does the collecting, the app does the judging.
+     Files are decoded like the inventory CSV (UTF-8 → CP949) and
+     HTML is reduced to text exactly as for fetched pages.
 2. **Relevance prefilter** — before any Clocked call, each fetched
    advisory is screened locally against the inventory's product
    space (model cores and words from your CSV, the fleet vendors,
@@ -286,12 +309,13 @@ Mock Mode is a feature, not a shortcut:
 ```
 app.py               Streamlit UI only (Batch + Paste modes, EN/KO)
 triage.py            All Clocked SDK access, matcher, verdict composition
-batch.py             Batch support: CSV inventory parsing, advisory fetching, batch runner
+batch.py             Batch support: CSV inventory parsing, advisory fetching, listing harvester, NVD/KEV feed collectors, upload conversion, batch runners
 mock_responses.json  Canned Extract/Decide/Verify responses per sample
-samples/             7 synthetic advisories + sample inventory
+samples/             7 synthetic advisories + sample inventory + NVD/KEV fixtures (real public data, trimmed)
 tests/test_triage.py Offline pytest suite (matcher + verdict composition)
 tests/test_app.py    AppTest suite (paste-mode widget state)
 tests/test_batch.py  Offline pytest suite (CSV, links, fetching, batch, batch UI)
+tests/test_feeds.py  Offline pytest suite (feed collectors, fixtures, uploads, items runner, feeds/uploads UI)
 .devcontainer/       One-click GitHub Codespaces environment (runs the app on port 8501)
 DEMO_SCRIPT.md       90-second demo video shot list
 ```
@@ -341,7 +365,19 @@ coverage for both input modes.
   challenge (measured live: Arista) report "blocked", and
   JavaScript-rendered portals (measured live: Cisco PSIRT,
   Juniper) report "no links found" — in both cases the UI directs
-  you to Link list mode rather than inventing results.
+  you to Link list mode rather than inventing results. The
+  **Vulnerability feeds** and **Upload advisory files** sources
+  exist precisely for those portals: NVD/KEV are official
+  machine-readable channels, and an upload lets the operator's own
+  browser do the collecting.
+- **Feed coverage is keyword-shaped and recent-first.** The NVD
+  source issues one keyword query per inventory vendor, restricted
+  to CVEs published in the last 119 days (the API's date-window
+  cap; without it the API returns the oldest matches first),
+  10 results each, newest first, 15 items max — not an exhaustive
+  per-product CPE walk; KEV only lists vulnerabilities known to
+  be exploited.
+  Feeds complement vendor advisories, they do not replace them.
 - **The relevance prefilter is a coarse screen.** It only drops
   advisories that mention nothing in the inventory's product space
   at all; the per-device verdict logic is unchanged, and the

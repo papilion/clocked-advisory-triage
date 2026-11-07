@@ -16,8 +16,9 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-from batch import (HARVEST_CAP, MAX_LINKS, harvest_links,
-                   parse_inventory_csv, parse_link_list, run_batch)
+from batch import (HARVEST_CAP, MAX_LINKS, collect_feed_items,
+                   harvest_links, parse_inventory_csv, parse_link_list,
+                   run_batch, run_batch_items, uploaded_files_to_items)
 from triage import parse_inventory, run_triage
 
 ROOT = Path(__file__).resolve().parent
@@ -210,6 +211,34 @@ STRINGS = {
         "source_label": "Advisory source",
         "source_listing": "Listing page (auto-collect)",
         "source_links": "Link list",
+        "source_feeds": "Vulnerability feeds (NVD / KEV)",
+        "source_uploads": "Upload advisory files",
+        "feeds_intro": (
+            "Collect CVEs for the vendors in your inventory from the "
+            "official machine-readable feeds - the NVD CVE API and "
+            "CISA's Known Exploited Vulnerabilities (KEV) catalog - "
+            "instead of scraping vendor portals, which mostly block "
+            "automated collection. The queries are derived from the "
+            "inventory below."
+        ),
+        "feeds_running": "Collecting vulnerability feeds (NVD / KEV)...",
+        "feeds_collected": "NVD: %d CVEs collected · KEV: %d matches",
+        "feeds_nvd_empty": "NVD: no CVEs found for the inventory vendors.",
+        "feeds_nvd_failed": "NVD: feed could not be fetched (%s)",
+        "feeds_nvd_no_vendors": (
+            "NVD: no known vendor (Cisco / Juniper / Arista / Nokia / "
+            "Extreme) found in the inventory models."
+        ),
+        "feeds_kev_empty": "KEV: no catalog entries match the inventory.",
+        "feeds_kev_failed": "KEV: feed could not be fetched (%s)",
+        "uploads_intro": (
+            "Upload advisory pages you saved from your own browser - "
+            "vendor portals often block automated collection, so your "
+            "browser does the collecting and this app does the "
+            "judging. Up to 10 files."
+        ),
+        "uploads_label": "Advisory files (.txt, .html, .md)",
+        "empty_uploads": "Upload at least one advisory file first.",
         "listing_url_label": "Listing / board URL",
         "listing_url_placeholder": "https://vendor.example/advisories",
         "preset_labels": {
@@ -380,6 +409,31 @@ STRINGS = {
         "source_label": "권고 소스",
         "source_listing": "목록 페이지 (자동 수집)",
         "source_links": "링크 목록",
+        "source_feeds": "취약점 피드 (NVD / KEV)",
+        "source_uploads": "권고 파일 업로드",
+        "feeds_intro": (
+            "벤더 포털은 자동 수집이 차단되는 경우가 많아, 대신 공식 "
+            "기계 판독 피드 — NVD CVE API와 CISA 악용 확인 취약점(KEV) "
+            "카탈로그 — 에서 인벤토리 벤더의 CVE를 수집합니다. 검색어는 "
+            "아래 인벤토리에서 자동으로 도출됩니다."
+        ),
+        "feeds_running": "취약점 피드(NVD / KEV)를 수집하는 중...",
+        "feeds_collected": "NVD: CVE %d건 수집 · KEV: %d건 일치",
+        "feeds_nvd_empty": "NVD: 인벤토리 벤더에 대한 CVE를 찾지 못했습니다.",
+        "feeds_nvd_failed": "NVD: 피드를 가져오지 못했습니다 (%s)",
+        "feeds_nvd_no_vendors": (
+            "NVD: 인벤토리 모델에서 알려진 벤더(Cisco / Juniper / "
+            "Arista / Nokia / Extreme)를 찾지 못했습니다."
+        ),
+        "feeds_kev_empty": "KEV: 인벤토리와 일치하는 카탈로그 항목이 없습니다.",
+        "feeds_kev_failed": "KEV: 피드를 가져오지 못했습니다 (%s)",
+        "uploads_intro": (
+            "본인 브라우저에서 저장한 권고 페이지를 올리세요 — 벤더 "
+            "포털은 자동 수집을 막는 경우가 많아, 수집은 브라우저가 "
+            "하고 판정은 이 앱이 합니다. 최대 10개 파일."
+        ),
+        "uploads_label": "권고 파일 (.txt, .html, .md)",
+        "empty_uploads": "권고 파일을 하나 이상 먼저 업로드해 주세요.",
         "listing_url_label": "목록 / 게시판 URL",
         "listing_url_placeholder": "https://vendor.example/advisories",
         "preset_labels": {
@@ -688,20 +742,28 @@ def _render_batch_mode(s, lang):
     st.session_state.setdefault("batch_results", None)
     st.session_state.setdefault("batch_notice_empty", False)
     st.session_state.setdefault("batch_notice_listing", False)
+    st.session_state.setdefault("batch_notice_uploads", False)
+    st.session_state.setdefault("feed_info", None)
     st.session_state.setdefault("batch_error_detail", None)
 
     st.subheader(s["links_heading"])
     st.caption(s["batch_intro"])
+    source_labels = {
+        "listing": s["source_listing"],
+        "links": s["source_links"],
+        "feeds": s["source_feeds"],
+        "uploads": s["source_uploads"],
+    }
     source = st.radio(
         s["source_label"],
-        ["listing", "links"],
+        ["listing", "links", "feeds", "uploads"],
         key="batch_source",
-        format_func=lambda m: (s["source_listing"] if m == "listing"
-                               else s["source_links"]),
+        format_func=lambda m: source_labels[m],
         horizontal=True,
     )
     urls = []  # type: List[str]
     listing_url = ""
+    uploaded_files = None
     if source == "listing":
         preset_cols = st.columns(len(LISTING_PRESETS))
         for col, (preset_key, preset_url) in zip(preset_cols,
@@ -713,7 +775,7 @@ def _render_batch_mode(s, lang):
             placeholder=s["listing_url_placeholder"],
             key="listing_url",
         )
-    else:
+    elif source == "links":
         st.button(s["load_sample_links"], on_click=_on_load_sample_links)
         links_text = st.text_area(
             s["links_label"], height=180,
@@ -723,6 +785,13 @@ def _render_batch_mode(s, lang):
         urls, links_skipped = parse_link_list(links_text)
         if links_skipped:
             st.caption(s["links_skipped_note"] % (links_skipped, MAX_LINKS))
+    elif source == "feeds":
+        st.caption(s["feeds_intro"])
+    elif source == "uploads":
+        st.caption(s["uploads_intro"])
+        uploaded_files = st.file_uploader(
+            s["uploads_label"], type=["txt", "html", "htm", "md"],
+            accept_multiple_files=True, key="advisory_uploads")
     judge_all = st.checkbox(s["judge_all_toggle"], key="judge_all")
 
     st.subheader(s["csv_heading"])
@@ -761,8 +830,39 @@ def _render_batch_mode(s, lang):
     if st.button(s["run_batch_button"], type="primary"):
         st.session_state["batch_notice_empty"] = False
         st.session_state["batch_notice_listing"] = False
+        st.session_state["batch_notice_uploads"] = False
         st.session_state["batch_error_detail"] = None
+        st.session_state["feed_info"] = None
+
+        def _run_judging(runner):
+            # type: (Any) -> None
+            """Run one batch runner behind the shared progress UI.
+            Per-item failures are isolated inside the runners; an
+            unexpected runner-level failure becomes the localized
+            banner + collapsed traceback, same as paste mode."""
+            progress_bar = st.progress(0)
+            status_line = st.empty()
+
+            def _progress(index, total, label):
+                # type: (int, int, str) -> None
+                progress_bar.progress(
+                    int(index * 100 / max(total, 1)))
+                status_line.caption(
+                    s["batch_progress"] % (index + 1, total, label))
+
+            try:
+                st.session_state["batch_results"] = runner(_progress)
+                st.session_state["batch_error_detail"] = None
+            except Exception:
+                st.session_state["batch_results"] = None
+                st.session_state["batch_error_detail"] = (
+                    traceback.format_exc())
+            finally:
+                progress_bar.empty()
+                status_line.empty()
+
         run_urls = list(urls)
+        items = None  # type: Optional[List[Dict[str, Any]]]
         if source == "listing":
             # Auto-collect first: harvest the listing page now (not
             # on every rerun) and keep the outcome in session state.
@@ -781,6 +881,37 @@ def _render_batch_mode(s, lang):
                             "reason": traceback.format_exc(limit=3)}
                 st.session_state["harvest_info"] = info
                 run_urls = list(info.get("urls") or [])
+        elif source == "feeds":
+            # Collect first (queries derive from the inventory);
+            # in Mock Mode the bundled fixtures are read instead of
+            # the network, so the demo path works offline.
+            st.session_state["batch_results"] = None
+            try:
+                with st.spinner(s["feeds_running"]):
+                    feed = collect_feed_items(
+                        parse_inventory(devices_text),
+                        mock=not _has_key())
+            except Exception:
+                feed = None
+                st.session_state["batch_error_detail"] = (
+                    traceback.format_exc())
+            if feed is not None:
+                st.session_state["feed_info"] = feed
+                if feed["items"]:
+                    items = list(feed["items"])
+                # Zero collected items: the per-feed status lines
+                # below explain the outcome; no batch is run.
+        elif source == "uploads":
+            st.session_state["batch_results"] = None
+            file_pairs = [(f.name, f.getvalue())
+                          for f in (uploaded_files or [])]
+            if not file_pairs:
+                # Friendly notice, same pattern as the empty-links
+                # guard; never run a batch with no items.
+                st.session_state["batch_notice_uploads"] = True
+            else:
+                items = uploaded_files_to_items(file_pairs)
+
         if source == "links" and not run_urls:
             # Friendly notice, same pattern as the empty-advisory
             # guard in paste mode; never call out with no links.
@@ -788,37 +919,39 @@ def _render_batch_mode(s, lang):
             st.session_state["batch_notice_empty"] = True
         elif source == "listing" and not run_urls:
             pass  # notice/harvest status below explains why
-        else:
-            progress_bar = st.progress(0)
-            status_line = st.empty()
-
-            def _progress(index, total, url):
-                # type: (int, int, str) -> None
-                progress_bar.progress(
-                    int(index * 100 / max(total, 1)))
-                status_line.caption(
-                    s["batch_progress"] % (index + 1, total, url))
-
-            try:
-                st.session_state["batch_results"] = run_batch(
-                    run_urls, devices_text, lang=lang,
-                    progress=_progress, prefilter=not judge_all)
-                st.session_state["batch_error_detail"] = None
-            except Exception:
-                # Localized banner + collapsed traceback, same
-                # pattern as paste mode; per-link failures are
-                # already isolated inside run_batch.
-                st.session_state["batch_results"] = None
-                st.session_state["batch_error_detail"] = (
-                    traceback.format_exc())
-            finally:
-                progress_bar.empty()
-                status_line.empty()
+        elif items is not None:
+            _run_judging(lambda progress: run_batch_items(
+                items, devices_text, lang=lang, progress=progress,
+                prefilter=not judge_all))
+        elif source in ("links", "listing"):
+            _run_judging(lambda progress: run_batch(
+                run_urls, devices_text, lang=lang, progress=progress,
+                prefilter=not judge_all))
 
     if st.session_state.get("batch_notice_empty"):
         st.warning(s["empty_links"])
     if st.session_state.get("batch_notice_listing"):
         st.warning(s["empty_listing"])
+    if st.session_state.get("batch_notice_uploads"):
+        st.warning(s["empty_uploads"])
+    feed_info = st.session_state.get("feed_info")
+    if source == "feeds" and feed_info:
+        nvd_info = feed_info.get("nvd") or {}
+        kev_info = feed_info.get("kev") or {}
+        st.caption(s["feeds_collected"] % (nvd_info.get("count", 0),
+                                           kev_info.get("count", 0)))
+        if nvd_info.get("status") == "empty":
+            st.warning(s["feeds_nvd_empty"])
+        elif nvd_info.get("status") == "no_vendors":
+            st.warning(s["feeds_nvd_no_vendors"])
+        elif nvd_info.get("status") == "fetch_failed":
+            st.error(s["feeds_nvd_failed"] % (
+                nvd_info.get("reason") or ""))
+        if kev_info.get("status") == "empty":
+            st.warning(s["feeds_kev_empty"])
+        elif kev_info.get("status") == "fetch_failed":
+            st.error(s["feeds_kev_failed"] % (
+                kev_info.get("reason") or ""))
     harvest_info = st.session_state.get("harvest_info")
     if source == "listing" and harvest_info:
         harvest_status = harvest_info.get("status")
@@ -849,14 +982,16 @@ def _render_batch_mode(s, lang):
 def _batch_advisory_label(item, lang):
     # type: (Dict[str, Any], str) -> str
     """Display name for one batch entry: the extracted advisory ID
-    when the triage produced one, else the fetched text's first
-    line, else the URL."""
+    when the triage produced one, else the pre-fetched item's label
+    (CVE id, filename), else the fetched text's first line, else
+    the URL."""
     triage_result = item.get("triage") or {}
     extracted = triage_result.get("extracted") or {}
     advisory_id = extracted.get("advisory_id")
     if advisory_id:
         return str(advisory_id)
-    return str(item.get("text_hint") or item.get("url") or "")
+    return str(item.get("label") or item.get("text_hint")
+               or item.get("url") or "")
 
 
 def _action_lines(result, s, lang):
@@ -951,10 +1086,15 @@ def _render_batch_results(results, s, lang):
         st.subheader(s["action_summary_heading"])
         for _rank, idx, item in actionable:
             triage_result = item.get("triage") or {}
-            st.markdown("- **#%d %s** - %s - [%s](%s)" % (
+            line = "- **#%d %s** - %s" % (
                 idx, _batch_advisory_label(item, lang),
-                _action_one_liner(triage_result, s, lang),
-                item.get("url") or "", item.get("url") or ""))
+                _action_one_liner(triage_result, s, lang))
+            url = item.get("url") or ""
+            if url:
+                # Uploaded files carry no URL: their line simply
+                # omits the link instead of rendering an empty one.
+                line = "%s - [%s](%s)" % (line, url, url)
+            st.markdown(line)
 
     st.subheader(s["batch_summary_heading"])
     summary_rows = []  # type: List[Dict[str, Any]]
@@ -1013,13 +1153,14 @@ def _render_batch_results(results, s, lang):
             verdict_display = ""
         elif item.get("status") == "skipped":
             title = "#%d %s - %s" % (
-                idx, item.get("text_hint") or item.get("url") or "",
+                idx, item.get("label") or item.get("text_hint")
+                or item.get("url") or "",
                 s["skipped_label"])
             verdict_display = ""
         if verdict_display:
             title = "%s - %s" % (title, verdict_display)
         with st.expander(title):
-            st.caption(str(item.get("url") or ""))
+            st.caption(str(item.get("url") or item.get("label") or ""))
             if item.get("status") == "skipped":
                 st.info(s["skipped_reason"])
             elif item.get("status") != "ok":

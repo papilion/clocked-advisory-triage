@@ -1,0 +1,35 @@
+{
+ "title": "CISA Catalog of Known Exploited Vulnerabilities (trimmed fixture)",
+ "vulnerabilities": [
+  {
+   "cveID": "CVE-2026-7473",
+   "vendorProject": "Arista",
+   "product": "Extensible Operating System",
+   "vulnerabilityName": "Arista Extensible Operating System Incomplete Comparison with Missing Factors Vulnerability",
+   "dateAdded": "2026-06-09",
+   "dueDate": "2026-06-23",
+   "requiredAction": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.",
+   "knownRansomwareCampaignUse": "Unknown"
+  },
+  {
+   "cveID": "CVE-2023-36844",
+   "vendorProject": "Juniper",
+   "product": "Junos OS",
+   "vulnerabilityName": "Juniper Junos OS EX Series PHP External Variable Modification Vulnerability",
+   "dateAdded": "2023-11-13",
+   "dueDate": "2023-11-17",
+   "requiredAction": "Apply mitigations per vendor instructions or discontinue use of the product if mitigations are unavailable.",
+   "knownRansomwareCampaignUse": "Unknown"
+  },
+  {
+   "cveID": "CVE-2023-20198",
+   "vendorProject": "Cisco",
+   "product": "IOS XE Web UI",
+   "vulnerabilityName": "Cisco IOS XE Web UI Privilege Escalation Vulnerability",
+   "dateAdded": "2023-10-16",
+   "dueDate": "2023-10-20",
+   "requiredAction": "Verify that instances of Cisco IOS XE Web UI are in compliance with BOD 23-02 and apply mitigations per vendor instructions. For affected products (Cisco IOS XE Web UI exposed to the internet or to untrusted networks), follow vendor instructions to determine if a system may have been compromised and immediately report positive findings to CISA.",
+   "knownRansomwareCampaignUse": "Unknown"
+  }
+ ]
+}

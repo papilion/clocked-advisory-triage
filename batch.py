@@ -19,13 +19,16 @@ Python 3.9 compatible: typing.Optional / Union only, no PEP 604 unions.
 """
 
 import csv
+import datetime
 import io
+import json
 import re
 import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from triage import GENERIC_PRODUCT_WORDS, _product_core, parse_inventory, run_triage
@@ -518,14 +521,12 @@ GENERIC_NETWORK_TOKENS = [
 ]
 
 
-def build_relevance_tokens(devices):
+def _device_tokens(devices):
     # type: (List[Dict[str, str]]) -> Set[str]
-    """Match tokens for the relevance prefilter: the inventory's
-    own product space (normalized model cores + significant model
-    words), the five fleet vendor names, and generic network-gear
-    terms. An advisory mentioning none of these is not about this
-    fleet's network gear at all."""
-    tokens = set(VENDOR_TOKENS) | set(GENERIC_NETWORK_TOKENS)  # type: Set[str]
+    """Tokens from the inventory itself only: normalized model
+    cores plus significant model words (no vendor/generic
+    additions)."""
+    tokens = set()  # type: Set[str]
     for device in devices or []:
         model = str((device or {}).get("model") or "")
         core = _product_core(model)
@@ -534,6 +535,18 @@ def build_relevance_tokens(devices):
         for word in re.findall(r"[a-z0-9]+", model.lower()):
             if len(word) >= 3 and word not in GENERIC_PRODUCT_WORDS:
                 tokens.add(word)
+    return tokens
+
+
+def build_relevance_tokens(devices):
+    # type: (List[Dict[str, str]]) -> Set[str]
+    """Match tokens for the relevance prefilter: the inventory's
+    own product space (normalized model cores + significant model
+    words), the five fleet vendor names, and generic network-gear
+    terms. An advisory mentioning none of these is not about this
+    fleet's network gear at all."""
+    tokens = set(VENDOR_TOKENS) | set(GENERIC_NETWORK_TOKENS)
+    tokens |= _device_tokens(devices)
     return tokens
 
 
@@ -556,8 +569,379 @@ def is_relevant(text, tokens):
 
 
 # ---------------------------------------------------------------------------
+# Vulnerability feeds (NVD + CISA KEV) and uploaded advisory files
+#
+# Real vendor portals mostly block server-side collection (bot
+# challenges, JavaScript-rendered listings), so the batch offers two
+# channels that work anyway: the official machine-readable feeds
+# (NVD CVE API, CISA KEV catalog), queried for the vendors actually
+# present in the inventory, and advisory files the operator saved
+# from their own browser. Both produce plain "items" -
+# {"label", "url", "text"} dicts - that flow through the exact same
+# judging path as fetched links (run_batch_items below).
+# ---------------------------------------------------------------------------
+
+NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+KEV_FEED_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
+                "known_exploited_vulnerabilities.json")
+NVD_RESULTS_PER_PAGE = 10
+NVD_QUERY_CAP = 4
+FEED_ITEM_CAP = 15
+MAX_UPLOAD_FILES = 10
+
+_SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
+
+# Deterministic vendor -> NVD keyword map. Vendors without a
+# mapping are queried by vendor name alone.
+FEED_VENDOR_KEYWORDS = {
+    "cisco": "Cisco IOS XE",
+    "juniper": "Juniper Junos",
+    "arista": "Arista EOS",
+    "nokia": "Nokia SR OS",
+    "extreme": "ExtremeXOS",
+}
+
+_VENDOR_MODEL_RES = (
+    ("cisco", re.compile(r"cisco|catalyst|nexus|\basr\b|ios[\s-]?xe",
+                         re.IGNORECASE)),
+    ("juniper", re.compile(r"juniper|junos|\bqfx|\bmx\d|\bex\d|\bsrx"
+                           r"|\bacx|\bptx", re.IGNORECASE)),
+    ("arista", re.compile(r"arista", re.IGNORECASE)),
+    ("nokia", re.compile(r"nokia", re.IGNORECASE)),
+    ("extreme", re.compile(r"extreme", re.IGNORECASE)),
+)
+
+
+def inventory_vendors(devices):
+    # type: (List[Dict[str, str]]) -> List[str]
+    """Vendors actually present in the inventory, in the fixed
+    VENDOR_TOKENS order. Detected from the model text - which is
+    also where parse_inventory_csv puts an explicit CSV vendor
+    column - via vendor names and signature product families
+    (Catalyst/Nexus/ASR -> Cisco, QFX/MX/EX/SRX -> Juniper, ...)."""
+    found = set()  # type: Set[str]
+    for device in devices or []:
+        model = str((device or {}).get("model") or "")
+        for vendor, pattern in _VENDOR_MODEL_RES:
+            if pattern.search(model):
+                found.add(vendor)
+    return [vendor for vendor in VENDOR_TOKENS if vendor in found]
+
+
+def _fetch_json(url, timeout=FETCH_TIMEOUT):
+    # type: (str, float) -> Any
+    """GET a URL and parse the body as JSON. Raises FetchError."""
+    text, _content_type, _final_url = _fetch_raw(url, timeout=timeout)
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise FetchError("invalid JSON response")
+
+
+def _nvd_item(vuln, keyword):
+    # type: (Any, str) -> Optional[Dict[str, Any]]
+    """Convert one NVD API vulnerability entry into a batch item,
+    or None when it carries no CVE id. The English description is
+    kept verbatim: it carries the affected-version prose ("EOS
+    before 4.14.5...") the extraction/matching already handles."""
+    cve = (vuln or {}).get("cve") or {}
+    cve_id = str(cve.get("id") or "").strip()
+    if not cve_id:
+        return None
+    description = ""
+    for entry in cve.get("descriptions") or []:
+        if (entry or {}).get("lang") == "en":
+            description = str(entry.get("value") or "")
+            break
+    score = None  # type: Any
+    severity = ""
+    metrics = cve.get("metrics") or {}
+    for metric_key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        entries = metrics.get(metric_key) or []
+        if entries:
+            data = (entries[0] or {}).get("cvssData") or {}
+            score = data.get("baseScore")
+            severity = str(data.get("baseSeverity") or "")
+            break
+    published_raw = str(cve.get("published") or "")
+    reference = ""
+    for entry in cve.get("references") or []:
+        url = str((entry or {}).get("url") or "").strip()
+        if url:
+            reference = url
+            break
+    lines = ["%s \u2014 %s" % (cve_id, keyword),
+             "Published: %s" % (published_raw[:10] or "not stated")]
+    if score is not None:
+        lines.append("CVSS: %s (%s)" % (score, severity or "not stated"))
+    else:
+        lines.append("CVSS: not stated")
+    text = "\n".join(lines) + "\n\n" + description.strip()
+    if reference:
+        text += "\n\nReference: %s" % reference
+    return {"label": cve_id,
+            "url": "https://nvd.nist.gov/vuln/detail/%s" % cve_id,
+            "text": text,
+            "_published": published_raw}
+
+
+def collect_nvd_items(devices, fetcher=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]]) -> Dict[str, Any]
+    """Query the NVD CVE API once per vendor present in the
+    inventory (FEED_VENDOR_KEYWORDS, at most NVD_QUERY_CAP queries)
+    and convert the results into batch items, newest first, capped
+    at FEED_ITEM_CAP, deduped by CVE id.
+
+    Returns {"items", "status", "count", "queries", "reason"} with
+    status "ok" | "empty" | "fetch_failed" | "no_vendors" - an
+    honest outcome, never fabricated items. `fetcher(url) -> parsed
+    JSON` is injectable for offline tests.
+    """
+    fetch = fetcher or _fetch_json
+    vendors = inventory_vendors(devices)
+    queries = [FEED_VENDOR_KEYWORDS.get(vendor, vendor)
+               for vendor in vendors[:NVD_QUERY_CAP]]
+    result = {"items": [], "status": "empty", "count": 0,
+              "queries": queries, "reason": ""}  # type: Dict[str, Any]
+    if not queries:
+        result["status"] = "no_vendors"
+        return result
+    collected = {}  # type: Dict[str, Dict[str, Any]]
+    errors = []  # type: List[str]
+    # NVD keyword search returns the OLDEST matches first, which is
+    # backwards for triage: restrict to the most recent 119 days
+    # (the API caps a publication-date window at 120 days) so the
+    # first page holds current CVEs.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    pub_end = now.strftime("%Y-%m-%dT%H:%M:%S.000")
+    pub_start = (now - datetime.timedelta(days=119)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000")
+    for term in queries:
+        url = NVD_API_URL + "?" + urllib.parse.urlencode(
+            {"keywordSearch": term,
+             "resultsPerPage": NVD_RESULTS_PER_PAGE,
+             "pubStartDate": pub_start,
+             "pubEndDate": pub_end})
+        try:
+            data = fetch(url)
+        except Exception as exc:
+            errors.append(str(exc) or exc.__class__.__name__)
+            continue
+        for vuln in (data or {}).get("vulnerabilities") or []:
+            item = _nvd_item(vuln, term)
+            if item is not None and item["label"] not in collected:
+                collected[item["label"]] = item
+    ordered = sorted(collected.values(),
+                     key=lambda item: item.get("_published") or "",
+                     reverse=True)
+    items = []  # type: List[Dict[str, Any]]
+    for item in ordered[:FEED_ITEM_CAP]:
+        item = dict(item)
+        item.pop("_published", None)
+        items.append(item)
+    result["items"] = items
+    result["count"] = len(items)
+    if items:
+        result["status"] = "ok"
+    elif errors and len(errors) == len(queries):
+        result["status"] = "fetch_failed"
+        result["reason"] = errors[0]
+    elif errors:
+        result["reason"] = errors[0]
+    return result
+
+
+def _kev_item(entry):
+    # type: (Dict[str, Any]) -> Dict[str, Any]
+    """Convert one CISA KEV catalog entry into a batch item. The
+    "Due date:" line is deliberate: the existing Extract pass picks
+    it up as the action deadline in the Action block."""
+    cve_id = str(entry.get("cveID") or "").strip()
+    text = (
+        "KEV %s \u2014 %s %s\n"
+        "Date added: %s\n"
+        "Due date: %s\n\n"
+        "%s\n"
+        "Required action: %s\n"
+        "Known ransomware use: %s"
+    ) % (
+        cve_id,
+        str(entry.get("vendorProject") or ""),
+        str(entry.get("product") or ""),
+        str(entry.get("dateAdded") or ""),
+        str(entry.get("dueDate") or ""),
+        str(entry.get("vulnerabilityName") or ""),
+        str(entry.get("requiredAction") or ""),
+        str(entry.get("knownRansomwareCampaignUse") or ""),
+    )
+    return {"label": "KEV %s" % cve_id,
+            "url": "https://nvd.nist.gov/vuln/detail/%s" % cve_id,
+            "text": text}
+
+
+def collect_kev_items(devices, fetcher=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]]) -> Dict[str, Any]
+    """Fetch the CISA KEV catalog once and keep the entries whose
+    vendorProject/product mentions an inventory vendor or a
+    significant inventory model token. Returns {"items", "status",
+    "count", "reason"} with status "ok" | "empty" |
+    "fetch_failed". `fetcher(url) -> parsed JSON` is injectable."""
+    fetch = fetcher or _fetch_json
+    result = {"items": [], "status": "empty", "count": 0,
+              "reason": ""}  # type: Dict[str, Any]
+    try:
+        data = fetch(KEV_FEED_URL)
+    except Exception as exc:
+        result["status"] = "fetch_failed"
+        result["reason"] = str(exc) or exc.__class__.__name__
+        return result
+    vendors = inventory_vendors(devices)
+    tokens = set(vendors) | _device_tokens(devices)
+    pattern = _relevance_pattern(tokens) if tokens else None
+    matched = []  # type: List[Dict[str, Any]]
+    for entry in (data or {}).get("vulnerabilities") or []:
+        if not isinstance(entry, dict):
+            continue
+        fields = "%s %s" % (entry.get("vendorProject") or "",
+                            entry.get("product") or "")
+        lowered = fields.lower()
+        if any(vendor in lowered for vendor in vendors):
+            matched.append(entry)
+        elif pattern is not None and pattern.search(fields):
+            matched.append(entry)
+    matched.sort(key=lambda e: str(e.get("dateAdded") or ""),
+                 reverse=True)
+    items = [_kev_item(entry) for entry in matched[:FEED_ITEM_CAP]]
+    result["items"] = items
+    result["count"] = len(items)
+    if items:
+        result["status"] = "ok"
+    return result
+
+
+def _load_fixture_json(filename):
+    # type: (str) -> Any
+    with (_SAMPLES_DIR / filename).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _fixture_nvd_fetcher(url):
+    # type: (str) -> Any
+    """Mock Mode NVD stand-in: the bundled fixture payload, filtered
+    to the queried vendor's first keyword word - the same filtering
+    the real keyword search performs server-side - so the shared
+    collect path behaves identically offline."""
+    data = _load_fixture_json("nvd_fixture.json")
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    term = (query.get("keywordSearch") or [""])[0]
+    vendor_word = term.split()[0].lower() if term.split() else ""
+    if not vendor_word:
+        return data
+    kept = []
+    for vuln in data.get("vulnerabilities") or []:
+        descriptions = ((vuln or {}).get("cve") or {}).get(
+            "descriptions") or []
+        text = " ".join(str((d or {}).get("value") or "")
+                        for d in descriptions)
+        if vendor_word in text.lower():
+            kept.append(vuln)
+    filtered = dict(data)
+    filtered["vulnerabilities"] = kept
+    return filtered
+
+
+def _fixture_kev_fetcher(url):
+    # type: (str) -> Any
+    return _load_fixture_json("kev_fixture.json")
+
+
+def collect_feed_items(devices, mock=False, nvd_fetcher=None,
+                       kev_fetcher=None):
+    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]]) -> Dict[str, Any]
+    """Collect batch items from both feeds. Returns {"items",
+    "nvd", "kev"} where "nvd"/"kev" are the per-feed outcome dicts
+    from collect_nvd_items / collect_kev_items. With mock=True and
+    no injected fetchers, the bundled fixture files are read
+    instead of the network, so the demo path works offline."""
+    if mock:
+        if nvd_fetcher is None:
+            nvd_fetcher = _fixture_nvd_fetcher
+        if kev_fetcher is None:
+            kev_fetcher = _fixture_kev_fetcher
+    nvd = collect_nvd_items(devices, fetcher=nvd_fetcher)
+    kev = collect_kev_items(devices, fetcher=kev_fetcher)
+    return {"items": list(nvd["items"]) + list(kev["items"]),
+            "nvd": nvd, "kev": kev}
+
+
+def uploaded_file_to_item(name, data):
+    # type: (str, bytes) -> Dict[str, Any]
+    """Turn one uploaded advisory file into a batch item: bytes are
+    decoded with the inventory CSV chain (utf-8-sig -> utf-8 ->
+    cp949), HTML (by .html/.htm name or by content) is reduced to
+    text with the same converter as fetched pages, and the text is
+    capped at MAX_TEXT_CHARS. The item URL is empty - the filename
+    is the label."""
+    text, _encoding = _decode_bytes(bytes(data or b""))
+    lowered = (name or "").lower()
+    head = text.lstrip()[:64].lower()
+    if lowered.endswith((".html", ".htm")) or head.startswith(
+            ("<!doctype", "<html", "<head", "<body")):
+        text = html_to_text(text)
+    return {"label": name or "upload", "url": "",
+            "text": text.strip()[:MAX_TEXT_CHARS]}
+
+
+def uploaded_files_to_items(files):
+    # type: (List[Tuple[str, bytes]]) -> List[Dict[str, Any]]
+    """Convert (filename, bytes) pairs into batch items, capped at
+    MAX_UPLOAD_FILES."""
+    items = []  # type: List[Dict[str, Any]]
+    for name, data in list(files or [])[:MAX_UPLOAD_FILES]:
+        items.append(uploaded_file_to_item(name, data))
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
+
+def _judge_entry(base, text, devices_text, api_key, lang, relevance):
+    # type: (Dict[str, Any], str, str, Optional[str], str, Optional[Any]) -> Dict[str, Any]
+    """Judge one already-available advisory text: relevance
+    prefilter first (no Clocked calls on a miss), then run_triage.
+    `base` carries the entry's identity keys (url, and label for
+    pre-fetched items)."""
+    entry = dict(base)
+    hint = ""
+    for line in (text or "").splitlines():
+        if line.strip():
+            hint = line.strip()[:80]
+            break
+    entry["text_hint"] = hint
+    if relevance is not None and not relevance.search(text or ""):
+        entry["status"] = "skipped"
+        entry["skip_reason"] = "not_relevant"
+        return entry
+    try:
+        triage_result = run_triage(text, devices_text,
+                                   api_key=api_key, lang=lang)
+    except Exception as exc:
+        entry["status"] = "error"
+        entry["error"] = str(exc) or exc.__class__.__name__
+        return entry
+    entry["status"] = "ok"
+    entry["triage"] = triage_result
+    return entry
+
+
+def _prefilter_pattern(prefilter, devices_text):
+    # type: (bool, str) -> Optional[Any]
+    if not prefilter:
+        return None
+    return _relevance_pattern(
+        build_relevance_tokens(parse_inventory(devices_text)))
+
 
 def run_batch(links, devices_text, api_key=None, lang="en",
               fetcher=fetch_advisory_text, progress=None,
@@ -578,10 +962,7 @@ def run_batch(links, devices_text, api_key=None, lang="en",
     on it. `progress`, when given, is called as
     progress(index, total, url) before each link is processed.
     """
-    relevance = None  # type: Optional[Any]
-    if prefilter:
-        relevance = _relevance_pattern(
-            build_relevance_tokens(parse_inventory(devices_text)))
+    relevance = _prefilter_pattern(prefilter, devices_text)
     results = []  # type: List[Dict[str, Any]]
     total = len(links)
     for index, url in enumerate(links):
@@ -599,34 +980,33 @@ def run_batch(links, devices_text, api_key=None, lang="en",
                 "error": str(exc) or exc.__class__.__name__,
             })
             continue
-        hint = ""
-        for line in (text or "").splitlines():
-            if line.strip():
-                hint = line.strip()[:80]
-                break
-        if relevance is not None and not relevance.search(text or ""):
-            results.append({
-                "url": url,
-                "status": "skipped",
-                "skip_reason": "not_relevant",
-                "text_hint": hint,
-            })
-            continue
-        try:
-            triage_result = run_triage(text, devices_text,
-                                       api_key=api_key, lang=lang)
-        except Exception as exc:
-            results.append({
-                "url": url,
-                "status": "error",
-                "error": str(exc) or exc.__class__.__name__,
-                "text_hint": hint,
-            })
-            continue
-        results.append({
-            "url": url,
-            "status": "ok",
-            "text_hint": hint,
-            "triage": triage_result,
-        })
+        results.append(_judge_entry({"url": url}, text, devices_text,
+                                     api_key, lang, relevance))
+    return results
+
+
+def run_batch_items(items, devices_text, api_key=None, lang="en",
+                    progress=None, prefilter=False):
+    # type: (List[Dict[str, Any]], str, Optional[str], str, Optional[Callable[[int, int, str], None]], bool) -> List[Dict[str, Any]]
+    """Triage pre-fetched items ({"label", "url", "text"} dicts,
+    as produced by the feed collectors and the upload converter)
+    against one inventory - the same judging path as run_batch,
+    minus the fetching. Entries additionally carry the item's
+    "label". `progress`, when given, is called as
+    progress(index, total, label) before each item is processed."""
+    relevance = _prefilter_pattern(prefilter, devices_text)
+    results = []  # type: List[Dict[str, Any]]
+    total = len(items)
+    for index, item in enumerate(items):
+        label = str((item or {}).get("label") or "")
+        url = str((item or {}).get("url") or "")
+        if progress is not None:
+            try:
+                progress(index, total, label or url)
+            except Exception:
+                pass
+        base = {"url": url, "label": label}
+        results.append(_judge_entry(
+            base, str((item or {}).get("text") or ""), devices_text,
+            api_key, lang, relevance))
     return results
