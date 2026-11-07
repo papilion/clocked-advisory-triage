@@ -316,7 +316,10 @@ def test_batch_defaults_to_listing_source_with_presets():
     assert at.radio[1].value == "listing"
     button_labels = [b.label for b in at.button]
     assert "Sample advisories (GitHub)" in button_labels
-    assert "Cisco PSIRT" in button_labels
+    # The vendor URL presets were removed: the Cisco / Juniper /
+    # Arista web listings cannot be harvested, so they are not
+    # offered as URL presets (the vendor presets cover them).
+    assert "Cisco PSIRT" not in button_labels
 
 
 def test_preset_button_fills_listing_url():

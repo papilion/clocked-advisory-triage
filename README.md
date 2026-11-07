@@ -103,13 +103,18 @@ The default screen is built for the real triage pile, not for
 copy-pasting:
 
 1. **Advisory source** — four ways in:
-   - **Listing page (auto-collect)** — give one vendor listing/board
-     URL (preset buttons for Cisco PSIRT, Arista, Juniper, and the
-     bundled GitHub samples) and the app harvests the advisory
-     links itself: same-domain anchors whose href or text looks
+   - **Listing page (auto-collect)** — give one server-rendered
+     listing/board URL (the only URL preset button is the bundled
+     GitHub samples) and the app harvests the advisory links
+     itself: same-domain anchors whose href or text looks
      advisory-ish (`advisory`, `cisco-sa`, `JSA…`, `/advisories/`, …),
      deduped, capped at **15**. GitHub tree pages resolve to their
-     raw file URLs. When a source cannot be harvested — a bot
+     raw file URLs. The big vendors' own web listings are NOT
+     offered as URL presets — Cisco PSIRT and Juniper are
+     JavaScript-rendered and Arista is bot-protected, so they
+     cannot be harvested; pasting one of those URLs earns a
+     pointer to the vendor presets below instead of a dead run.
+     When any other source cannot be harvested — a bot
      challenge page, or a JavaScript shell with no links in the
      HTML — the app says so plainly and points you at Link list
      mode; it never fakes a result.

@@ -13,6 +13,7 @@ import os
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import streamlit as st
 
@@ -60,13 +61,14 @@ FIELD_ORDER = ("vendor", "products", "affected_versions",
                "advisory_id", "cve_id", "severity",
                "fixed_version", "action_deadline")
 
-# Listing/board presets for batch auto-collection: (STRINGS key, URL).
+# Listing/board URL presets for batch auto-collection:
+# (STRINGS key, URL). Only the bundled samples preset remains:
+# the Cisco / Juniper / Arista web listings cannot be harvested
+# (JavaScript-rendered / bot-protected), so they are deliberately
+# NOT offered as URL presets - the structured vendor presets
+# below cover those vendors, and _unscrapable_listing_vendor
+# steers a hand-pasted URL for one of those pages to them.
 LISTING_PRESETS = [
-    ("preset_cisco",
-     "https://sec.cloudapps.cisco.com/security/center/publicationListing.x"),
-    ("preset_arista",
-     "https://www.arista.com/en/support/advisories-notices/security-advisories"),
-    ("preset_juniper", "https://supportportal.juniper.net/"),
     ("preset_samples",
      "https://github.com/papilion/clocked-advisory-triage/tree/main/samples"),
 ]
@@ -329,6 +331,15 @@ STRINGS = {
             "this vendor offline. Turn Demo mode off (live mode) "
             "to collect %s from the NVD / KEV feeds."
         ),
+        "listing_unscrapable_notice": (
+            "That URL is %s's own web listing, which cannot be "
+            "collected directly - it is JavaScript-rendered or "
+            "bot-protected, so auto-collect finds no advisory "
+            "links there. Use the %s vendor preset below "
+            "instead: it collects the same vendor's advisories "
+            "from structured sources (NVD / CISA KEV + vendor "
+            "original texts)."
+        ),
         "uploads_intro": (
             "Upload advisory pages you saved from your own browser - "
             "vendor portals often block automated collection, so your "
@@ -340,9 +351,6 @@ STRINGS = {
         "listing_url_label": "Listing / board URL",
         "listing_url_placeholder": "https://vendor.example/advisories",
         "preset_labels": {
-            "preset_cisco": "Cisco PSIRT",
-            "preset_arista": "Arista",
-            "preset_juniper": "Juniper",
             "preset_samples": "Sample advisories (GitHub)",
         },
         "empty_listing": (
@@ -604,6 +612,14 @@ STRINGS = {
             "데모 모드를 끈 라이브 모드에서 NVD / KEV 피드로 "
             "수집해 주세요."
         ),
+        "listing_unscrapable_notice": (
+            "입력한 URL은 %s의 웹 목록 페이지라 직접 수집할 수 "
+            "없습니다 - 자바스크립트로 렌더링되거나 봇 차단이 "
+            "걸려 있어 자동 수집으로는 권고 링크를 찾을 수 "
+            "없습니다. 대신 아래 %s 제조사 프리셋을 사용해 "
+            "주세요: 같은 제조사의 권고를 구조화 소스(NVD / "
+            "CISA KEV + 제조사 원문)에서 수집합니다."
+        ),
         "uploads_intro": (
             "본인 브라우저에서 저장한 권고 페이지를 올리세요 — 벤더 "
             "포털은 자동 수집을 막는 경우가 많아, 수집은 브라우저가 "
@@ -614,9 +630,6 @@ STRINGS = {
         "listing_url_label": "목록 / 게시판 URL",
         "listing_url_placeholder": "https://vendor.example/advisories",
         "preset_labels": {
-            "preset_cisco": "Cisco PSIRT",
-            "preset_arista": "Arista",
-            "preset_juniper": "Juniper",
             "preset_samples": "샘플 권고 (GitHub)",
         },
         "empty_listing": "목록 URL을 먼저 입력해 주세요 — 위 프리셋을 눌러도 됩니다.",
@@ -769,6 +782,7 @@ def _on_set_listing_url(url):
     a selected vendor preset - the last choice wins."""
     st.session_state["listing_url"] = url
     st.session_state["listing_vendor"] = None
+    st.session_state["listing_unscrapable"] = None
     st.session_state["vendor_info"] = None
     st.session_state["vendor_demo_notice"] = None
     st.session_state["harvest_info"] = None
@@ -786,6 +800,7 @@ def _on_set_listing_vendor(vendor):
     run outcome is dropped, same as the URL presets do."""
     st.session_state["listing_vendor"] = vendor
     st.session_state["listing_url"] = ""
+    st.session_state["listing_unscrapable"] = None
     st.session_state["harvest_info"] = None
     st.session_state["batch_results"] = None
     st.session_state["batch_notice_empty"] = False
@@ -798,8 +813,47 @@ def _on_clear_listing_vendor():
     # type: () -> None
     """Clear-vendor-preset callback: back to the free URL field."""
     st.session_state["listing_vendor"] = None
+    st.session_state["listing_unscrapable"] = None
     st.session_state["vendor_info"] = None
     st.session_state["vendor_demo_notice"] = None
+
+
+# Vendor web listings that cannot be auto-collected - the pages
+# are JavaScript-rendered (Cisco PSIRT, Juniper's portal) or sit
+# behind a bot challenge (Arista). The host/path patterns derive
+# from the vendor URL presets that used to be offered next to the
+# samples preset; those presets were removed (known-dead options
+# do not belong in the UI), and the structured vendor presets
+# above are the working route for these vendors.
+def _unscrapable_listing_vendor(url):
+    # type: (str) -> Optional[str]
+    """Vendor key when a free-form listing URL points at a vendor
+    web listing that cannot be harvested, else None. The Run
+    handler uses this to steer a hand-pasted vendor listing URL
+    to the matching vendor preset notice instead of a dead
+    harvest that finds no links."""
+    text = (url or "").strip()
+    if text and "://" not in text:
+        text = "https://" + text
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    path = (parts.path or "").lower()
+    if host == "sec.cloudapps.cisco.com":
+        return "cisco"
+    if host in ("www.cisco.com", "cisco.com") and (
+            "publicationlisting" in path
+            or "/security/center/" in path):
+        return "cisco"
+    if host == "supportportal.juniper.net":
+        return "juniper"
+    if host in ("www.arista.com", "arista.com") and (
+            "advisories-notices" in path
+            or "security-advisories" in path):
+        return "arista"
+    return None
 
 
 def _has_key():
@@ -879,6 +933,7 @@ def main():
         st.session_state["feed_info"] = None
         st.session_state["vendor_info"] = None
         st.session_state["vendor_demo_notice"] = None
+        st.session_state["listing_unscrapable"] = None
         st.session_state["batch_error_detail"] = None
 
     st.title(s["title"])
@@ -1016,6 +1071,7 @@ def _render_batch_mode(s, lang, demo_mode=False):
     st.session_state.setdefault("links_text", "")
     st.session_state.setdefault("listing_url", "")
     st.session_state.setdefault("listing_vendor", None)
+    st.session_state.setdefault("listing_unscrapable", None)
     st.session_state.setdefault("vendor_info", None)
     st.session_state.setdefault("vendor_demo_notice", None)
     st.session_state.setdefault("batch_source", "listing")
@@ -1139,6 +1195,7 @@ def _render_batch_mode(s, lang, demo_mode=False):
         st.session_state["feed_info"] = None
         st.session_state["vendor_info"] = None
         st.session_state["vendor_demo_notice"] = None
+        st.session_state["listing_unscrapable"] = None
 
         def _run_judging(runner):
             # type: (Any) -> None
@@ -1212,6 +1269,15 @@ def _render_batch_mode(s, lang, demo_mode=False):
                 st.session_state["batch_notice_listing"] = True
                 st.session_state["harvest_info"] = None
                 run_urls = []
+            elif _unscrapable_listing_vendor(listing_url.strip()):
+                # A known un-harvestable vendor listing pasted by
+                # hand: skip the dead harvest entirely and render
+                # the steering notice below (the vendor preset
+                # covers this vendor via structured sources).
+                st.session_state["listing_unscrapable"] = (
+                    _unscrapable_listing_vendor(listing_url.strip()))
+                st.session_state["harvest_info"] = None
+                run_urls = []
             else:
                 try:
                     with st.spinner(s["harvest_running"]):
@@ -1282,6 +1348,12 @@ def _render_batch_mode(s, lang, demo_mode=False):
         notice_label = s["vendor_preset_labels"].get(
             vendor_demo_notice, vendor_demo_notice)
         st.warning(s["vendor_demo_unavailable"]
+                   % (notice_label, notice_label))
+    unscrapable = st.session_state.get("listing_unscrapable")
+    if source == "listing" and unscrapable:
+        notice_label = s["vendor_preset_labels"].get(
+            unscrapable, unscrapable)
+        st.warning(s["listing_unscrapable_notice"]
                    % (notice_label, notice_label))
     feed_info = st.session_state.get("feed_info")
     vendor_info = st.session_state.get("vendor_info")
