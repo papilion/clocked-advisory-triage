@@ -3,12 +3,13 @@
 All Clocked SDK access lives in this module (and nowhere else).
 Pipeline per run (exactly 4 Clocked calls in live mode):
   1. extract   - pull structured fields from the advisory text
-  1b. extract  - focused second pass whose ONLY field is
-                 applicability_conditions: measured live, span
-                 extraction of that field is unreliable inside the
-                 full-field call (it came back empty even when the
-                 condition sentence was plainly in the text), while
-                 the focused call returns it reliably
+  1b. extract  - focused second pass carrying only
+                 applicability_conditions and workarounds: measured
+                 live, span extraction of those fields is unreliable
+                 inside the full-field call (conditions came back
+                 empty even when the condition sentence was plainly
+                 in the text), while the focused call returns them
+                 reliably
   2. (local)   - deterministic matcher: extracted product/version vs inventory
   3. decide    - urgency + evidence sufficiency, with probabilities
   4. grounding - Verify step: check the verdict claim against the
@@ -1041,6 +1042,19 @@ def normalize_extraction(extracted, raw_fields=None):
             raw_conditions, index, fallback)
         conditions.append(entry)
     normalized["conditions"] = conditions
+
+    # Workarounds: a plain list of strings for display (the Action
+    # block); tolerate a bare string or still-wrapped item dicts.
+    plain_workarounds = normalized.get("workarounds") or []
+    if isinstance(plain_workarounds, str):
+        plain_workarounds = [plain_workarounds]
+    workarounds = []  # type: List[str]
+    for item in plain_workarounds:
+        if isinstance(item, dict) and isinstance(item.get("value"), str):
+            item = item["value"]
+        if isinstance(item, str) and item.strip():
+            workarounds.append(item)
+    normalized["workarounds"] = workarounds
     return normalized
 
 
@@ -1477,11 +1491,24 @@ _CONDITIONS_FIELD = {
     "list": True,
 }
 
+# Workarounds ride along in the focused extract pass (same
+# span-extraction reliability reasoning as conditions) and feed the
+# deterministic "Action required" block in the UI.
+_WORKAROUNDS_FIELD = {
+    "description": (
+        "Workarounds, mitigations, or interim protective measures "
+        "the advisory itself states - quoted or closely paraphrased "
+        "from the advisory. Empty when the advisory states none."
+    ),
+    "list": True,
+}
 
-def _condition_strings(plain_fields):
-    # type: (Dict[str, Any]) -> List[str]
-    """Non-empty condition strings from plain (unwrapped) fields."""
-    value = plain_fields.get("applicability_conditions")
+
+def _plain_list_strings(plain_fields, field_name):
+    # type: (Dict[str, Any], str) -> List[str]
+    """Non-empty strings of a list field from plain (unwrapped)
+    fields."""
+    value = plain_fields.get(field_name)
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, list):
@@ -1490,19 +1517,26 @@ def _condition_strings(plain_fields):
             if isinstance(v, str) and v.strip()]
 
 
+def _condition_strings(plain_fields):
+    # type: (Dict[str, Any]) -> List[str]
+    """Non-empty condition strings from plain (unwrapped) fields."""
+    return _plain_list_strings(plain_fields, "applicability_conditions")
+
+
 def _live_extract(client, advisory_text):
     # type: (Any, str) -> Tuple[Dict[str, Any], Dict[str, Any]]
     """Return (plain fields, raw fields) via the shared unwrap path.
 
-    Two Extract calls: the main field set, then a FOCUSED call whose
-    only field is applicability_conditions. Measured live, span
-    extraction reliability drops as the field count grows: inside
-    the full call the conditions field came back empty even when
-    the condition sentence was plainly in the text, while the
-    focused call returned it reliably. The focused result wins when
-    it carries conditions; otherwise the main call's value stands
-    (both raw and plain are swapped together, so per-item
-    confidences stay attached to the winning field).
+    Two Extract calls: the main field set, then a FOCUSED call
+    carrying only applicability_conditions and workarounds.
+    Measured live, span extraction reliability drops as the field
+    count grows: inside the full call the conditions field came
+    back empty even when the condition sentence was plainly in the
+    text, while the focused call returned it reliably. Per field,
+    the focused result wins when it carries values; otherwise the
+    main call's value stands (both raw and plain are swapped
+    together, so per-item confidences stay attached to the winning
+    field).
 
     The schema deliberately does NOT request a version_constraints
     field: a normalized token ("before:21.4R2") is not a text span,
@@ -1517,14 +1551,16 @@ def _live_extract(client, advisory_text):
             "Extract the fields verbatim from this network security advisory. "
             "Do not infer values that are not stated; leave a field empty "
             "when the advisory does not state it. "
-            "applicability_conditions is a restatement of what the "
-            "advisory states, per its field description."
+            "applicability_conditions and workarounds are "
+            "restatements of what the advisory states, per their "
+            "field descriptions."
         ),
         fields={
             "vendor": "Vendor or issuing organisation named in the advisory",
             "products": {"description": "Product names or models affected", "list": True},
             "affected_versions": {"description": "Software versions listed as affected", "list": True},
             "applicability_conditions": _CONDITIONS_FIELD,
+            "workarounds": _WORKAROUNDS_FIELD,
             "advisory_id": "Advisory identifier",
             "cve_id": "CVE identifier, if any",
             "severity": "Severity rating as stated",
@@ -1539,23 +1575,24 @@ def _live_extract(client, advisory_text):
     focused = client.extract(
         text=advisory_text,
         instructions=(
-            "Extract ONLY the applicability conditions from this network "
-            "security advisory: conditions that must hold for the advisory "
-            "to apply, beyond product and version. Do not infer "
-            "conditions that are not stated; leave the field empty when "
-            "the advisory applies to the listed products and versions "
-            "unconditionally."
+            "Extract ONLY two fields from this network security "
+            "advisory: (1) the applicability conditions - conditions "
+            "that must hold for the advisory to apply, beyond product "
+            "and version - and (2) the workarounds or mitigations "
+            "the advisory states. Do not infer anything that is not "
+            "stated; leave a field empty when the advisory states "
+            "none."
         ),
-        fields={"applicability_conditions": _CONDITIONS_FIELD},
+        fields={"applicability_conditions": _CONDITIONS_FIELD,
+                "workarounds": _WORKAROUNDS_FIELD},
     )
     focused_plain, focused_raw = unwrap_extract_result(focused)
-    if _condition_strings(focused_plain):
-        plain["applicability_conditions"] = focused_plain.get(
-            "applicability_conditions")
-        if "applicability_conditions" in focused_raw:
-            raw = dict(raw)
-            raw["applicability_conditions"] = focused_raw[
-                "applicability_conditions"]
+    for field_name in ("applicability_conditions", "workarounds"):
+        if _plain_list_strings(focused_plain, field_name):
+            plain[field_name] = focused_plain.get(field_name)
+            if field_name in focused_raw:
+                raw = dict(raw)
+                raw[field_name] = focused_raw[field_name]
     return plain, raw
 
 

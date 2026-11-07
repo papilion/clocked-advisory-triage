@@ -853,6 +853,21 @@
      "p_verify": 0.99,
      "start": 140,
      "value": "Arista-style Networks (synthetic sample)"
+    },
+    "workarounds": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 986,
+       "p_verify": 0.99,
+       "start": 868,
+       "value": "Restrict management-plane access to trusted networks\nuntil the condition is confirmed and fixed software is installed."
+      }
+     ],
+     "value": [
+      "Restrict management-plane access to trusted networks\nuntil the condition is confirmed and fixed software is installed."
+     ]
     }
    }
   },

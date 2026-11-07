@@ -1021,7 +1021,7 @@ def test_live_run_triage_condition_gate_fires(monkeypatch):
         def extract(self, **kwargs):
             self.extract_calls.append(kwargs)
             fields = kwargs.get("fields") or {}
-            if set(fields) == {"applicability_conditions"}:
+            if set(fields) == {"applicability_conditions", "workarounds"}:
                 return {"fields": {
                     "applicability_conditions": LIVE_CONDITIONS_FIELD}}
             return {"fields": main_fields}
@@ -1080,7 +1080,7 @@ class _RecordingExtractClient(object):
     def extract(self, **kwargs):
         self.calls.append(kwargs)
         fields = kwargs.get("fields") or {}
-        if set(fields) == {"applicability_conditions"}:
+        if set(fields) == {"applicability_conditions", "workarounds"}:
             return {"fields": self.focused_fields}
         return {"fields": self.main_fields}
 
@@ -1107,7 +1107,8 @@ def test_live_extract_merges_focused_conditions():
     assert len(client.calls) == 2
     main_fields = client.calls[0]["fields"]
     focused_fields = client.calls[1]["fields"]
-    assert set(focused_fields) == {"applicability_conditions"}
+    assert set(focused_fields) == {"applicability_conditions",
+                                       "workarounds"}
     # The focused call asks for the conditions with the SAME field
     # definition (description text) as the main call.
     assert focused_fields["applicability_conditions"] == \

@@ -1,8 +1,11 @@
 # Advisory Triage for Network Operators
 
-Paste a vendor security advisory and your device inventory. Get **one
-defensible verdict** — **AFFECTED**, **NOT AFFECTED**, or
-**CANNOT DETERMINE** — with the evidence shown, not hidden.
+Give it a **list of advisory links** and your **device inventory as a
+CSV upload** — it fetches every advisory itself and returns **one
+defensible verdict** per advisory — **AFFECTED**, **NOT AFFECTED**,
+or **CANNOT DETERMINE** — with the evidence shown, not hidden.
+(Pasting a single advisory by hand is still available as the second
+input mode.)
 
 Built for the **Clocked Build Challenge** by a network operator, for
 network operators. The honest third verdict is the point: when an
@@ -37,9 +40,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Then click one of the sample buttons (**Sample 1–7**) and
-**Run Triage**. That works with no API key (Mock Mode, canned Clocked
-responses).
+The app opens in **Batch mode**: click the **Sample advisories
+(GitHub)** preset, then **Run Batch** — the app collects the seven
+sample advisory links from the GitHub listing itself and triages
+them all. That works with no API key (Mock Mode, canned Clocked
+responses). Or switch to **Paste (single advisory)**, click one of
+the sample buttons (**Sample 1–7**) and **Run Triage**.
 
 For live analysis of your own advisories, set a Clocked API key
 (free account: 4,000 credits; challenge code `CLOCKEDHACKATHON` adds
@@ -83,6 +89,72 @@ The key is never stored in this repository.
 
 한국어 사용자도 같은 순서입니다: 위 배지를 눌러 Codespace를 만들면
 앱이 자동으로 실행되고, 키가 없으면 데모 모드로 열립니다.
+
+## Batch mode — the primary workflow
+
+The default screen is built for the real triage pile, not for
+copy-pasting:
+
+1. **Advisory source** — two ways in:
+   - **Listing page (auto-collect)** — give one vendor listing/board
+     URL (preset buttons for Cisco PSIRT, Arista, Juniper, and the
+     bundled GitHub samples) and the app harvests the advisory
+     links itself: same-domain anchors whose href or text looks
+     advisory-ish (`advisory`, `cisco-sa`, `JSA…`, `/advisories/`, …),
+     deduped, capped at **15**. GitHub tree pages resolve to their
+     raw file URLs. When a source cannot be harvested — a bot
+     challenge page, or a JavaScript shell with no links in the
+     HTML — the app says so plainly and points you at Link list
+     mode; it never fakes a result.
+   - **Link list** — paste advisory URLs, one per line (the
+     fallback/advanced option). The app fetches each page itself
+     (HTML is reduced to readable text; plain-text advisories pass
+     through) and runs the full pipeline per link. One bad link
+     never aborts the batch — it shows up as a `FETCH FAILED` row
+     with the reason.
+2. **Relevance prefilter** — before any Clocked call, each fetched
+   advisory is screened locally against the inventory's product
+   space (model cores and words from your CSV, the fleet vendors,
+   and generic network-gear terms). An advisory that mentions none
+   of them is marked `SKIPPED — not related to the uploaded
+   inventory` and costs **zero API calls**. A toggle ("Judge all
+   advisories") turns the filter off.
+3. **Inventory CSV** — upload the full device inventory once; every
+   advisory is judged against every device. Column handling is
+   flexible:
+   - headers are matched case-insensitively in English or Korean:
+     hostname ← `host|hostname|name|device|장비명|호스트명`,
+     model ← `model|모델|장비모델`,
+     version ← `version|os|os version|버전|펌웨어`,
+     plus an optional `vendor|벤더|제조사` column that prefixes the
+     model when it isn't already there;
+   - extra columns (serial, IP, region, …) are ignored;
+   - with no recognizable header row, columns are taken positionally
+     as host, model, version;
+   - encoding is decoded as UTF-8 (BOM ok) with a CP949 fallback for
+     Korean Excel exports, and the delimiter may be `,`, `;`, or tab;
+   - rows missing host, model, or version are skipped and counted,
+     and the first parsed devices are previewed before you run.
+4. **Results** — an **Action summary** first (only the advisories
+   that need action, AFFECTED before CANNOT DETERMINE, one line
+   each with its link), then a summary table (verdict, urgency,
+   affected-device count, conditions flag per advisory; skipped
+   and fetch-failed items appear as their own rows), plus one
+   expandable detail per advisory. Every detail — in batch and in
+   single mode — carries a deterministic **Action required** block:
+   for AFFECTED, the affected hostnames, the fixed version to
+   upgrade to, the deadline, and any workaround the advisory
+   states (extracted by the same focused Extract pass as the
+   applicability conditions); for CANNOT DETERMINE, the exact
+   conditions to verify; for NOT AFFECTED, "No action required."
+
+Caps that keep a batch sane: at most **10 links** per Link-list
+run (extras are reported as skipped), **15** harvested links per
+listing, **2 MB** per download, **40,000 characters** of extracted
+text per advisory, 15 s fetch timeout. With no CSV uploaded, the
+bundled sample inventory is used so the demo still runs in one
+click. **Paste (single advisory)** mode — the original paste-text
+UI — remains available in the mode switch at the top.
 
 ## How it works
 
@@ -212,11 +284,14 @@ Mock Mode is a feature, not a shortcut:
 ## Project layout
 
 ```
-app.py               Streamlit UI only
+app.py               Streamlit UI only (Batch + Paste modes, EN/KO)
 triage.py            All Clocked SDK access, matcher, verdict composition
+batch.py             Batch support: CSV inventory parsing, advisory fetching, batch runner
 mock_responses.json  Canned Extract/Decide/Verify responses per sample
 samples/             7 synthetic advisories + sample inventory
 tests/test_triage.py Offline pytest suite (matcher + verdict composition)
+tests/test_app.py    AppTest suite (paste-mode widget state)
+tests/test_batch.py  Offline pytest suite (CSV, links, fetching, batch, batch UI)
 .devcontainer/       One-click GitHub Codespaces environment (runs the app on port 8501)
 DEMO_SCRIPT.md       90-second demo video shot list
 ```
@@ -233,7 +308,12 @@ unparseable / product-absent matcher cases, constraint parsing and
 comparison (including the suffix-ambiguity case), the applicability
 condition gate, grounding overturn, and low-sufficiency downgrade,
 plus the full mock pipeline for all seven samples in English and
-Korean.
+Korean. The batch suite covers CSV parsing (UTF-8 BOM, CP949,
+semicolon/tab delimiters, Korean headers, vendor prefixing, skipped
+rows, positional fallback), link-list cleaning and capping,
+HTML-to-text extraction, the batch runner with an injected stub
+fetcher (one fetch failure never aborts the batch), and AppTest
+coverage for both input modes.
 
 ## Limitations
 
@@ -251,7 +331,21 @@ Korean.
   the tool gates the verdict to CANNOT DETERMINE and tells you
   exactly what to check on the device. Feeding it a configuration
   inventory would let those verdicts resolve.
-- **Single advisory per run.** Paste one advisory at a time.
+- **Batch fetching is best-effort.** Batch mode downloads advisory
+  pages directly; pages behind a login, a bot wall, or heavy
+  JavaScript rendering may come back as `FETCH FAILED` rows or with
+  partial text (which then honestly trends to CANNOT DETERMINE).
+  Paste mode remains the fallback for those.
+- **Listing auto-collect is best-effort too, and honest about it.**
+  Server-rendered listings harvest well; portals behind a bot
+  challenge (measured live: Arista) report "blocked", and
+  JavaScript-rendered portals (measured live: Cisco PSIRT,
+  Juniper) report "no links found" — in both cases the UI directs
+  you to Link list mode rather than inventing results.
+- **The relevance prefilter is a coarse screen.** It only drops
+  advisories that mention nothing in the inventory's product space
+  at all; the per-device verdict logic is unchanged, and the
+  filter can be switched off per run.
 - **No data retention.** The app stores nothing; advisory and inventory
   text exist only for the duration of a run (and are sent to the
   Clocked API in live mode).

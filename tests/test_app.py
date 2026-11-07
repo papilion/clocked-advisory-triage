@@ -35,8 +35,14 @@ def _sample_text(filename):
 
 
 def _fresh_app():
+    # The app now opens in Batch mode by default; these regression
+    # tests cover the Paste mode, so switch the mode radio first.
+    # All assertions below are unchanged.
     at = AppTest.from_file(APP)
     at.run()
+    assert not at.exception
+    assert at.radio[0].value == "batch"
+    at.radio[0].set_value("paste").run()
     assert not at.exception
     return at
 
