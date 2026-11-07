@@ -282,6 +282,61 @@ deep-triaged"). Local verdicts derive from the vendor-published
 structured ranges — not from the model — and cost no Clocked
 calls at all.
 
+### Feed correctness: windows, rate limits, KEV strength, sources
+
+- **Every NVD request carries a publication-date window**
+  (`pubStartDate`/`pubEndDate`). Without one the API returns its
+  oldest matches first (2015-era CVEs); both collectors — the
+  recent 119-day view and the year pipeline — build their URLs
+  only through the window helpers, so no code path can ask NVD
+  an unwindowed question.
+- **Rate budgets are honoured, and a key is optional.** NVD
+  allows 5 requests / 30 s without a key and 50 / 30 s with one;
+  collection spaces requests accordingly (6.1 s / 0.65 s) and
+  retries 429/403 with the server's `Retry-After` when given.
+  Set `NVD_API_KEY` (environment or Streamlit secrets; it is
+  sent only as a request header, never in a URL) to make a
+  no-key year run of minutes take well under one.
+- **KEV membership is priority, not a verdict.** The KEV
+  catalog publishes no version ranges, so a KEV item whose
+  product matches the fleet but for which neither NVD, KEV,
+  nor a traced vendor original states affected versions
+  becomes a local **CANNOT DETERMINE** row ("KEV-listed product
+  matches this device; confirm the installed version is not
+  affected") with the KEV due date, required action and
+  ransomware flag as a checklist — never AFFECTED, never NOT
+  AFFECTED, and it spends no Clocked calls. When ranges do
+  exist, they decide exactly as for any other item.
+- **One CVE is one item, and its sources are shown.** The two
+  collectors share a single merge: a CVE named by both feeds
+  appears once, and every row carries a **Sources** badge —
+  `NVD`, `KEV`, or `NVD + KEV` — in the summary table and the
+  detail view. (The vendor document a verdict's evidence came
+  from — CSAF / JSA / CNA — is still shown separately.)
+- **Reachability is probed, not assumed.** Each live run
+  probes NVD, KEV, Cisco CSAF, Arista CSAF, Juniper JSA and the
+  CNA mirror in the deployment itself and classifies each as
+  `ok`, `blocked-challenge` (HTTP 200 but an HTML challenge or
+  portal shell — status codes alone lie for these vendors),
+  `http-error`, `network-error` or `invalid-content`, shown as
+  one caption line. Probing never blocks or alters collection.
+- **Sync is a short in-process cache, KEV only.** The KEV
+  catalog is cached for 15 minutes with ETag revalidation, so
+  back-to-back runs do not re-download it; its
+  `catalogVersion` is the freshness proof shown in the caption.
+  NVD responses are deliberately *not* cached across runs:
+  windows are relative to now, records are revised, and a stale
+  range could manufacture a false clear.
+- **Juniper JSA pages must prove they are the article.** A
+  traced JSA is accepted only when the page names its JSA id
+  and carries advisory markers — the support portal's
+  community shell is long and plausible but is not the article,
+  and it falls back to the CNA record. When a genuine JSA
+  states "prior to X"-style branch bounds, they are parsed
+  into *partial* ranges: a device inside a stated branch is a
+  real hit, but absence from a partially parsed branch list
+  never clears a device.
+
 ## How it works
 
 ```
@@ -497,6 +552,18 @@ coverage for both input modes.
   affected-version ranges instead. Arista's CSAF endpoint can
   bot-challenge automated fetches; the same CNA fallback applies.
   A failed trace is never dressed up as a traced one.
+- **Cisco advisories with no CVE are a known gap.** Discovery
+  is NVD keyword search plus KEV, both CVE-keyed; a Cisco
+  advisory that carries no CVE cannot enter the merge/screen
+  machinery. Cisco's CSAF RSS index is probed for reachability
+  but is not yet a discovery source — that is deferred, not
+  forgotten.
+- **Arista and Juniper portals block automated fetches.** Their
+  CSAF/JSA endpoints can answer HTTP 200 with a bot-challenge
+  or portal-shell page; the app classifies that honestly
+  (`blocked-challenge`), never ingests the shell as evidence,
+  and falls back to the vendor-submitted CNA record, which
+  carries the same branch ranges. No bypass is attempted.
 - **The relevance prefilter is a coarse screen.** It only drops
   advisories that mention nothing in the inventory's product space
   at all; the per-device verdict logic is unchanged, and the

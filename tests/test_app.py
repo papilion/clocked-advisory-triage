@@ -232,9 +232,17 @@ def test_feeds_under_override_with_key_uses_fixtures():
     assert results is not None
     assert len(results) == 4
     assert all(r["status"] == "ok" for r in results)
-    judged = [r["triage"] for r in results if r.get("triage")]
+    judged = [r["triage"] for r in results if r.get("triage")
+              and r.get("basis") != "local-screen"]
     assert judged
     assert all(t["mode"] == "mock" for t in judged)
+    # The range-less KEV-only fixture item is the design's K-2
+    # local row (section 3): local in every mode, never judged.
+    kev_rows = [r for r in results
+                if r.get("basis") == "local-screen"]
+    assert len(kev_rows) == 1
+    assert kev_rows[0]["triage"]["mode"] == "local"
+    assert kev_rows[0]["triage"]["verdict"] == "CANNOT DETERMINE"
 
 
 # --------- stale sample binding / stale mode results ---------------

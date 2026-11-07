@@ -321,3 +321,25 @@ def test_app_vendor_demo_nokia_notice_korean():
     warnings = [w.value or "" for w in at.warning]
     assert any("데모 데이터는 Cisco" in w and "Nokia" in w
                for w in warnings), warnings
+
+
+def test_vendor_preset_nokia_caption_no_original():
+    # Seeded-state render (the year-suite renderer pattern): a
+    # Nokia vendor run carries the no-vendor-original caption; a
+    # Cisco run does not.
+    sentence = ("No vendor structured original is available for "
+                "this vendor")
+    for vendor, expected in (("nokia", True), ("cisco", False)):
+        at = AppTest.from_file(APP)
+        at.session_state["batch_results"] = []
+        at.session_state["batch_source"] = "listing"
+        at.session_state["vendor_info"] = {"vendor": vendor}
+        at.session_state["feed_info"] = {
+            "vendor": vendor, "nvd": {"count": 0},
+            "kev": {"count": 0}, "screening": {},
+            "collection": {}, "reachability": {}}
+        at.run()
+        assert not at.exception
+        captions = [c.value or "" for c in at.caption]
+        assert any(sentence in c for c in captions) is expected, \
+            (vendor, captions)

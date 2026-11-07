@@ -141,7 +141,7 @@ def test_trace_cisco_csaf_via_derived_url():
     traced, stats = trace_items([item], fetcher=text_fetch,
                                 json_fetcher=json_fetch)
     assert seen == [CISCO_CSAF_URL]
-    assert stats == {"traced": 1, "attempted": 1,
+    assert stats == {"traced": 1, "attempted": 1, "fallbacks": 0,
                      "by_source": {"Cisco CSAF": 1}}
     out = traced[0]
     assert out["source_label"] == "Cisco CSAF"
@@ -297,7 +297,8 @@ def test_trace_failure_leaves_item_unchanged():
 
     traced, stats = trace_items([item], fetcher=boom,
                                 json_fetcher=boom)
-    assert stats == {"traced": 0, "attempted": 1, "by_source": {}}
+    assert stats == {"traced": 0, "attempted": 1, "fallbacks": 0,
+                     "by_source": {}}
     assert traced[0] == item
     assert "source_label" not in traced[0]
 
@@ -310,7 +311,8 @@ def test_trace_item_without_cve_not_attempted():
 
     traced, stats = trace_items([item], fetcher=boom,
                                 json_fetcher=boom)
-    assert stats == {"traced": 0, "attempted": 0, "by_source": {}}
+    assert stats == {"traced": 0, "attempted": 0, "fallbacks": 0,
+                     "by_source": {}}
     assert traced[0] == item
 
 
@@ -319,23 +321,24 @@ def test_trace_item_without_cve_not_attempted():
 def test_trace_mock_mode_fixtures():
     devices = parse_inventory(_sample_text("inventory_sample.txt"))
     feed = collect_feed_items(devices, mock=True)
-    ordered = list(feed["kev"]["items"]) + list(feed["nvd"]["items"])
-    traced, stats = trace_items(ordered, mock=True)
-    assert stats["attempted"] == 6
-    assert stats["traced"] == 3
+    # The shared merge makes the recent collection one item per
+    # CVE (4 items, not 6): tracing attempts those 4.
+    traced, stats = trace_items(list(feed["items"]), mock=True)
+    assert stats["attempted"] == 4
+    assert stats["traced"] == 2
     assert stats["by_source"] == {"Cisco CSAF": 1,
-                                  "CVE CNA record": 2}
+                                  "CVE CNA record": 1}
     by_label = {}
     for entry in traced:
         by_label.setdefault(entry["label"], []).append(entry)
     cisco = by_label["CVE-2023-20198"][0]
     assert cisco["source_label"] == "Cisco CSAF"
     assert "Cisco IOS XE Software 17.9.4" in cisco["text"]
-    # The Juniper CVE resolves through the CNA fixture on both its
-    # KEV and NVD items (the fixture JSA fetch honestly fails over).
-    for entry in by_label["KEV CVE-2023-36844"] + by_label["CVE-2023-36844"]:
-        assert entry["source_label"] == "CVE CNA record"
-        assert "20.4R3-S9" in entry["text"]
+    # The Juniper CVE resolves through the CNA fixture on its one
+    # merged item (the fixture JSA fetch honestly fails over).
+    juniper = by_label["CVE-2023-36844"][0]
+    assert juniper["source_label"] == "CVE CNA record"
+    assert "20.4R3-S9" in juniper["text"]
     # CVEs with no fixture record stay untraced - nothing borrowed.
     assert "source_label" not in by_label["KEV CVE-2026-7473"][0]
     assert "source_label" not in by_label["CVE-2016-6894"][0]
@@ -420,7 +423,7 @@ def test_trace_cisco_csaf_attaches_traced_ranges():
             rng["vendor"], rng["product"]) == "cisco ios xe"
 
 
-def test_trace_jsa_text_route_attaches_no_ranges():
+def test_trace_jsa_genuine_but_boundless_attaches_no_ranges():
     page = "JSA72300 - J-Web vulnerability. " * 30  # > 400 chars
 
     def text_fetch(url):
@@ -458,3 +461,114 @@ def test_run_batch_items_source_passthrough():
     assert results[1]["status"] == "skipped"
     assert results[1]["source_label"] == "CVE CNA record"
     assert results[1]["source_url"] == "https://records.example/b"
+
+
+# --------------------- JSA genuine check + ranges -------------------
+
+def test_trace_jsa_community_shell_falls_back_to_cna():
+    shell = ("CEC Juniper Community - Welcome to the community. "
+             "Navigation: Home Forums Knowledge Base Support. "
+             * 40)  # ~2500 chars, no JSA id, no bound phrases
+    assert len(shell) > 2000
+    assert "JSA72300" not in shell
+    payload = _load_fixture("cve_cna_fixture.json")
+
+    def text_fetch(url):
+        return shell
+
+    def json_fetch(url):
+        return payload
+
+    traced, stats = trace_items([_juniper_item()], fetcher=text_fetch,
+                                json_fetcher=json_fetch)
+    out = traced[0]
+    assert out["source_label"] == "CVE CNA record"
+    assert out["traced_ranges"]
+    assert "CEC Juniper Community" not in out["text"]
+    assert stats["fallbacks"] >= 1
+
+
+def test_jsa_is_genuine_cases():
+    url = "https://supportportal.juniper.net/JSA72300"
+    genuine = ("JSA72300 - Junos OS: J-Web vulnerability. "
+               "Affected releases prior to 21.2R3.")
+    assert batch._jsa_is_genuine(genuine, url) is True
+    shell = "CEC Juniper Community - forums and knowledge base."
+    assert batch._jsa_is_genuine(shell, url) is False
+    # An id from a numeric article slug, with no advisory marker
+    # anywhere in the body, is not genuine.
+    slug_url = ("https://supportportal.juniper.net/s/article/"
+                "Some-Advisory-72300")
+    bare = "72300 - lorem ipsum dolor sit amet, consectetur."
+    assert batch._jsa_is_genuine(bare, slug_url) is False
+
+
+def test_jsa_traced_ranges_prior_to_branches():
+    text = ("Junos OS: 21.2 versions prior to 21.2R3-S7;\n"
+            "22.1 versions prior to 22.1R2;")
+    ranges = batch._jsa_traced_ranges(text)
+    assert len(ranges) == 2
+    assert all(r["partial"] is True for r in ranges)
+    assert ranges[0]["start_including"] == "21.2"
+    assert ranges[0]["end_excluding"] == "21.2R3-S7"
+    assert ranges[1]["start_including"] == "22.1"
+    assert ranges[1]["end_excluding"] == "22.1R2"
+    for rng in ranges:
+        assert batch._cpe_product_key(
+            rng["vendor"], rng["product"]) == "juniper junos"
+
+
+def test_jsa_partial_range_hit_but_no_clear():
+    from batch import screen_feed_items
+    ranges = batch._jsa_traced_ranges(
+        "Junos OS: 21.2 versions prior to 21.2R3-S7;\n"
+        "22.1 versions prior to 22.1R2;")
+    item = {"label": "CVE-2026-6001",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-6001",
+            "text": "CVE-2026-6001 Junos OS advisory.",
+            "published": "2026-06-01", "severity_rank": 3,
+            "kev": False, "cpe_ranges": list(ranges)}
+    # 21.3R3 sits in NO stated branch, but the ranges are
+    # partial, so absence is not a clear: candidate, no local row.
+    rows, candidates, stats = screen_feed_items(
+        [dict(item)], "RTR-01, MX480, 21.3R3\n")
+    assert rows == []
+    assert [c["label"] for c in candidates] == ["CVE-2026-6001"]
+    assert stats["uncertain_candidates"] == 1
+    # 21.2R1 is inside branch 1 (a partial hit): still a
+    # candidate driven by the hit, never a local row.
+    rows, candidates, stats = screen_feed_items(
+        [dict(item)], "RTR-01, MX480, 21.2R1\n")
+    assert rows == []
+    assert [c["label"] for c in candidates] == ["CVE-2026-6001"]
+    assert stats["uncertain_candidates"] == 0
+
+
+def test_trace_arista_challenge_falls_back_and_counts():
+    item = {"label": "CVE-2024-9999",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-9999",
+            "text": "CVE-2024-9999 \u2014 Arista EOS\n\nFeed body.",
+            "references": [
+                "https://www.arista.com/en/support/advisories-notices/"
+                "security-advisory/24838-security-advisory-0199"]}
+    payload = _cna_payload(
+        "CVE-2024-9999", "EOS",
+        [{"version": "4.30.0", "lessThan": "4.30.6M",
+          "status": "affected"}],
+        "Arista EOS flaw.")
+
+    def json_fetch(url):
+        if "arista.com" in url:
+            raise FetchError("challenge page (HTTP 200 HTML)",
+                             status=200, content_type="text/html")
+        return payload
+
+    def text_fetch(url):
+        raise FetchError("unused")
+
+    traced, stats = trace_items([item], fetcher=text_fetch,
+                                json_fetcher=json_fetch)
+    out = traced[0]
+    assert out["source_label"] == "CVE CNA record"
+    assert stats["fallbacks"] >= 1
+    assert "challenge" not in out["text"]

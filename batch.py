@@ -20,6 +20,7 @@ Python 3.9 compatible: typing.Optional / Union only, no PEP 604 unions.
 
 import csv
 import datetime
+import os
 import io
 import json
 import re
@@ -52,7 +53,19 @@ USER_AGENT = (
 
 
 class FetchError(Exception):
-    """One advisory link could not be fetched (short reason as text)."""
+    """One advisory link could not be fetched (short reason as text).
+
+    Optional structured attributes (defaults keep every existing
+    raise/except site working): `status` is the HTTP status when
+    one is known, `retry_after` the parsed Retry-After seconds,
+    `content_type` the response content type when known."""
+
+    def __init__(self, message, status=None, retry_after=None,
+                 content_type=""):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+        self.content_type = content_type or ""
 
 
 # ---------------------------------------------------------------------------
@@ -266,29 +279,103 @@ def html_to_text(html_text):
     return "\n".join(lines)
 
 
-def _fetch_raw(url, timeout=FETCH_TIMEOUT):
-    # type: (str, float) -> Tuple[str, str, str]
+REACH_OK = "ok"
+REACH_CHALLENGE = "blocked-challenge"
+REACH_HTTP = "http-error"
+REACH_NETWORK = "network-error"
+REACH_INVALID = "invalid-content"
+
+
+def _parse_retry_after(value):
+    # type: (Any) -> Optional[float]
+    """Parse a Retry-After header value: seconds form only; the
+    HTTP-date form returns None (callers fall back to backoff)."""
+    if value is None:
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _looks_like_html(text, content_type):
+    # type: (str, str) -> bool
+    """True when a response body is an HTML page (by content type
+    or by a leading markup marker) - the shape of a bot-challenge
+    or portal-shell page served with HTTP 200."""
+    if "html" in str(content_type or "").lower():
+        return True
+    head = str(text or "").lstrip()[:512].lower()
+    return head.startswith("<") and ("<html" in head
+                                     or "<!doctype" in head)
+
+
+def _classify_error(exc):
+    # type: (Any) -> str
+    """Classify a fetch failure into a REACH_* string for the
+    reachability probe and feed reporting."""
+    status = getattr(exc, "status", None)
+    message = str(exc or "")
+    if status == 200 or "challenge" in message.lower():
+        return REACH_CHALLENGE
+    if status:
+        return REACH_HTTP
+    if message.startswith("timeout") or message.startswith(
+            "network error"):
+        return REACH_NETWORK
+    return REACH_INVALID
+
+
+def _fetch_raw_ex(url, timeout=FETCH_TIMEOUT, headers=None):
+    # type: (str, float, Optional[Dict[str, str]]) -> Tuple[str, str, str, Dict[str, str], int]
     """Download a URL once. Returns (decoded_text, content_type,
-    final_url_after_redirects). Raises FetchError on any failure."""
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": USER_AGENT,
-                 "Accept": "text/html, text/plain, */*"},
-    )
+    final_url_after_redirects, response_headers_lowercased,
+    status). Raises FetchError on any failure, carrying the HTTP
+    status / Retry-After / content type when known; an HTTP 304
+    is raised as FetchError("not modified", status=304) so the
+    cache layer can catch exactly that."""
+    request_headers = {"User-Agent": USER_AGENT,
+                       "Accept": "text/html, text/plain, */*"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             content_type = ""
             charset = None
             final_url = url
+            status = 200
+            response_headers = {}  # type: Dict[str, str]
             try:
                 content_type = response.headers.get("Content-Type") or ""
                 charset = response.headers.get_content_charset()
                 final_url = response.geturl() or url
+                status = int(getattr(response, "status", 200) or 200)
+                response_headers = {
+                    str(k).lower(): str(v)
+                    for k, v in response.headers.items()}
             except Exception:
                 pass
             raw = response.read(MAX_DOWNLOAD_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        raise FetchError("HTTP %d" % exc.code)
+        error_headers = {}  # type: Dict[str, str]
+        try:
+            if exc.headers:
+                error_headers = {
+                    str(k).lower(): str(v)
+                    for k, v in exc.headers.items()}
+        except Exception:
+            pass
+        retry_after = _parse_retry_after(
+            error_headers.get("retry-after"))
+        error_type = error_headers.get("content-type", "")
+        if exc.code == 304:
+            raise FetchError("not modified", status=304,
+                             retry_after=retry_after,
+                             content_type=error_type)
+        raise FetchError("HTTP %d" % exc.code, status=exc.code,
+                         retry_after=retry_after,
+                         content_type=error_type)
     except (TimeoutError, socket.timeout):
         raise FetchError("timeout")
     except urllib.error.URLError as exc:
@@ -306,6 +393,16 @@ def _fetch_raw(url, timeout=FETCH_TIMEOUT):
         text = raw.decode(charset or "utf-8")
     except (UnicodeDecodeError, LookupError):
         text = raw.decode("utf-8", errors="replace")
+    return text, content_type, final_url, response_headers, status
+
+
+def _fetch_raw(url, timeout=FETCH_TIMEOUT):
+    # type: (str, float) -> Tuple[str, str, str]
+    """Download a URL once. Returns (decoded_text, content_type,
+    final_url_after_redirects). Raises FetchError on any failure.
+    Thin 3-tuple wrapper over _fetch_raw_ex."""
+    text, content_type, final_url, _headers, _status = _fetch_raw_ex(
+        url, timeout=timeout)
     return text, content_type, final_url
 
 
@@ -598,6 +695,12 @@ def is_relevant(text, tokens):
 NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 KEV_FEED_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
                 "known_exploited_vulnerabilities.json")
+NVD_API_KEY_ENV = "NVD_API_KEY"
+NVD_SLEEP_WITH_KEY = 0.65      # 50 req / 30 s  ->  >= 0.6 s spacing
+NVD_SLEEP_NO_KEY = 6.1         #  5 req / 30 s  ->  >= 6.0 s spacing
+NVD_MAX_RETRIES = 2            # extra attempts on 429/403 only
+NVD_RETRY_BACKOFF = (2.0, 5.0)  # seconds, used when no Retry-After
+NVD_RETRY_AFTER_CAP = 30.0
 NVD_RESULTS_PER_PAGE = 10
 NVD_QUERY_CAP = 6
 FEED_ITEM_CAP = 15
@@ -770,10 +873,92 @@ def _vendor_query_term(vendor, devices):
     return "%s %s" % (display, token) if token else display
 
 
-def _fetch_json(url, timeout=FETCH_TIMEOUT):
-    # type: (str, float) -> Any
-    """GET a URL and parse the body as JSON. Raises FetchError."""
-    text, _content_type, _final_url = _fetch_raw(url, timeout=timeout)
+def _nvd_api_key():
+    # type: () -> Optional[str]
+    """The configured NVD API key (env only - app.py mirrors the
+    Streamlit secret into the env), or None."""
+    return os.environ.get(NVD_API_KEY_ENV) or None
+
+
+def _nvd_sleep_seconds(has_key):
+    # type: (bool) -> float
+    """Request spacing honouring the official NVD budget for the
+    key state: 50 requests / 30 s with a key, 5 / 30 s without."""
+    return NVD_SLEEP_WITH_KEY if has_key else NVD_SLEEP_NO_KEY
+
+
+def _nvd_fetcher(fetcher, has_key):
+    # type: (Optional[Callable[[str], Any]], bool) -> Callable[[str], Any]
+    """The fetcher to use for NVD calls. An injected fetcher is
+    returned unchanged (it keeps the one-argument fetch(url)
+    signature). The default fetcher gains the API key as the
+    `apiKey` header when one is configured - the key travels
+    only in the header, never in a URL."""
+    if fetcher is not None:
+        return fetcher
+    if has_key:
+        key = _nvd_api_key()
+
+        def fetch_with_key(url):
+            # type: (str) -> Any
+            return _fetch_json(url, headers={"apiKey": key})
+
+        return fetch_with_key
+    return _fetch_json
+
+
+def _fetch_with_retry(fetch, url, sleep):
+    # type: (Callable[[str], Any], str, Optional[Callable[[float], None]]) -> Any
+    """Call fetch(url), retrying rate-limit failures (an error
+    carrying status 429 or 403) up to NVD_MAX_RETRIES extra
+    times. The wait is the error's Retry-After (capped) when it
+    carries one, else the next NVD_RETRY_BACKOFF value, via the
+    injected `sleep` callable (no-op when sleep is None). Errors
+    without a status attribute (plain stub FetchErrors) and all
+    other statuses propagate immediately."""
+    attempt = 0
+    while True:
+        try:
+            return fetch(url)
+        except Exception as exc:
+            status = getattr(exc, "status", None)
+            if status not in (429, 403) or attempt >= NVD_MAX_RETRIES:
+                raise
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is not None:
+                delay = min(float(retry_after), NVD_RETRY_AFTER_CAP)
+            else:
+                delay = NVD_RETRY_BACKOFF[
+                    min(attempt, len(NVD_RETRY_BACKOFF) - 1)]
+            if sleep is not None:
+                try:
+                    sleep(delay)
+                except Exception:
+                    pass
+            attempt += 1
+
+
+def _nvd_recent_window(now):
+    # type: (datetime.datetime) -> Tuple[str, str]
+    """(pubStartDate, pubEndDate) strings for the recent
+    collector's 119-day window, formatted exactly like the year
+    collector's _nvd_ts so the two cannot drift apart."""
+    return (_nvd_ts(now - datetime.timedelta(days=119)),
+            _nvd_ts(now))
+
+
+def _fetch_json(url, timeout=FETCH_TIMEOUT, headers=None):
+    # type: (str, float, Optional[Dict[str, str]]) -> Any
+    """GET a URL and parse the body as JSON. Raises FetchError.
+    An HTML body (a bot-challenge or portal shell served with
+    HTTP 200) is rejected with a challenge-named error instead of
+    the generic invalid-JSON one, so callers can tell a blocked
+    vendor source from a truncated body."""
+    text, content_type, _final_url, _headers, _status = _fetch_raw_ex(
+        url, timeout=timeout, headers=headers)
+    if _looks_like_html(text, content_type):
+        raise FetchError("challenge page (HTTP 200 HTML)", status=200,
+                         content_type=content_type)
     try:
         return json.loads(text)
     except ValueError:
@@ -978,12 +1163,14 @@ def _nvd_item(vuln, keyword):
             "published": published_raw[:10],
             "severity_rank": _severity_rank(score, severity),
             "kev": False,
+            "sources": ["NVD"],
             "cpe_ranges": _nvd_cpe_ranges(cve),
             "_published": published_raw}
 
 
-def collect_nvd_items(devices, fetcher=None, vendor=None):
-    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[str]) -> Dict[str, Any]
+def collect_nvd_items(devices, fetcher=None, vendor=None, sleep=None,
+                      now=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[str], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Dict[str, Any]
     """Query the NVD CVE API once per vendor present in the
     inventory (_nvd_query_terms: curated keywords for the core
     network vendors, derived "<Vendor> <product>" terms for the
@@ -1001,11 +1188,14 @@ def collect_nvd_items(devices, fetcher=None, vendor=None):
     honest outcome, never fabricated items. `fetcher(url) -> parsed
     JSON` is injectable for offline tests.
     """
-    fetch = fetcher or _fetch_json
+    has_key = bool(_nvd_api_key())
+    fetch = _nvd_fetcher(fetcher, has_key)
     queries = ([_vendor_query_term(vendor, devices)] if vendor
                else _nvd_query_terms(devices))
     result = {"items": [], "status": "empty", "count": 0,
-              "queries": queries, "reason": ""}  # type: Dict[str, Any]
+              "queries": queries, "reason": "",
+              "rate_budget": "key" if has_key else "no-key",
+              "requests_made": 0}  # type: Dict[str, Any]
     if not queries:
         result["status"] = "no_vendors"
         return result
@@ -1015,19 +1205,24 @@ def collect_nvd_items(devices, fetcher=None, vendor=None):
     # NVD keyword search returns the OLDEST matches first, which is
     # backwards for triage: restrict to the most recent 119 days
     # (the API caps a publication-date window at 120 days) so the
-    # first page holds current CVEs.
-    now = datetime.datetime.now(datetime.timezone.utc)
-    pub_end = now.strftime("%Y-%m-%dT%H:%M:%S.000")
-    pub_start = (now - datetime.timedelta(days=119)).strftime(
-        "%Y-%m-%dT%H:%M:%S.000")
-    for term in queries:
+    # first page holds current CVEs. Every request carries the
+    # window - no code path may call NVD_API_URL without one.
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    pub_start, pub_end = _nvd_recent_window(moment)
+    for query_index, term in enumerate(queries):
+        if sleep is not None and query_index > 0:
+            try:
+                sleep(_nvd_sleep_seconds(has_key))
+            except Exception:
+                pass
         url = NVD_API_URL + "?" + urllib.parse.urlencode(
             {"keywordSearch": term,
              "resultsPerPage": NVD_RESULTS_PER_PAGE,
              "pubStartDate": pub_start,
              "pubEndDate": pub_end})
         try:
-            data = fetch(url)
+            result["requests_made"] += 1
+            data = _fetch_with_retry(fetch, url, sleep)
         except Exception as exc:
             errors.append(str(exc) or exc.__class__.__name__)
             per_query.append([])
@@ -1102,7 +1297,99 @@ def _kev_item(entry):
             "due_date": str(entry.get("dueDate") or ""),
             "severity_rank": 4,
             "kev": True,
+            "sources": ["KEV"],
+            "required_action": str(entry.get("requiredAction") or ""),
+            "ransomware": str(
+                entry.get("knownRansomwareCampaignUse") or ""),
+            "vuln_name": str(entry.get("vulnerabilityName") or ""),
+            "vendor_project": str(entry.get("vendorProject") or ""),
+            "product_name": str(entry.get("product") or ""),
             "cpe_ranges": []}
+
+
+class _TTLCache:
+    """Tiny in-process TTL cache: {key: (expires_monotonic,
+    value_dict)}. Single-threaded Streamlit execution makes a
+    lock unnecessary. `get` honours expiry; `peek` returns the
+    stored value even when expired (the KEV catalog layer needs
+    the stored validators for a conditional revalidation)."""
+
+    def __init__(self):
+        self._store = {}  # type: Dict[str, Tuple[float, Dict[str, Any]]]
+
+    def get(self, key):
+        # type: (str) -> Optional[Dict[str, Any]]
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        expires, value = entry
+        if time.monotonic() >= expires:
+            return None
+        return value
+
+    def peek(self, key):
+        # type: (str) -> Optional[Dict[str, Any]]
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        return entry[1]
+
+    def put(self, key, value, ttl):
+        # type: (str, Dict[str, Any], float) -> None
+        self._store[key] = (time.monotonic() + float(ttl), value)
+
+    def clear(self):
+        # type: () -> None
+        self._store.clear()
+
+
+_FEED_CACHE = _TTLCache()
+
+KEV_CACHE_TTL = 900
+
+
+def _fetch_kev_catalog(fetcher=None):
+    # type: (Optional[Callable[[str], Any]]) -> Tuple[Any, bool]
+    """Fetch the CISA KEV catalog JSON, returning (data,
+    from_cache). An injected fetcher (tests / Mock Mode) is
+    called directly and never touches the cache. The default
+    path serves an unexpired cache entry with no HTTP, and on
+    expiry revalidates with the stored ETag / Last-Modified
+    validators: a 304 re-serves the stored body and renews the
+    TTL; a 200 stores the body and the new validators."""
+    if fetcher is not None:
+        return fetcher(KEV_FEED_URL), False
+    cached = _FEED_CACHE.get("kev_catalog")
+    if cached is not None:
+        return cached.get("data"), True
+    stale = _FEED_CACHE.peek("kev_catalog") or {}
+    headers = {}  # type: Dict[str, str]
+    if stale.get("etag"):
+        headers["If-None-Match"] = str(stale["etag"])
+    if stale.get("last_modified"):
+        headers["If-Modified-Since"] = str(stale["last_modified"])
+    try:
+        text, content_type, _final_url, response_headers, _status = (
+            _fetch_raw_ex(KEV_FEED_URL, headers=headers or None))
+    except FetchError as exc:
+        if getattr(exc, "status", None) == 304 \
+                and stale.get("data") is not None:
+            _FEED_CACHE.put("kev_catalog", stale, KEV_CACHE_TTL)
+            return stale.get("data"), True
+        raise
+    if _looks_like_html(text, content_type):
+        raise FetchError("challenge page (HTTP 200 HTML)", status=200,
+                         content_type=content_type)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise FetchError("invalid JSON response")
+    value = {"data": data,
+             "etag": response_headers.get("etag"),
+             "last_modified": response_headers.get("last-modified"),
+             "fetched_at": time.time()}  # type: Dict[str, Any]
+    _FEED_CACHE.put("kev_catalog", value, KEV_CACHE_TTL)
+    return data, False
 
 
 def _parse_iso_date(value):
@@ -1138,15 +1425,18 @@ def collect_kev_items(devices, fetcher=None, cap=FEED_ITEM_CAP,
     history. Entries with an unparseable dateAdded are kept: an
     undated entry is not evidence of age. `fetcher(url) ->
     parsed JSON` is injectable."""
-    fetch = fetcher or _fetch_json
     result = {"items": [], "status": "empty", "count": 0,
-              "reason": "", "older_excluded": 0}  # type: Dict[str, Any]
+              "reason": "", "older_excluded": 0,
+              "catalog_version": "", "from_cache": False}  # type: Dict[str, Any]
     try:
-        data = fetch(KEV_FEED_URL)
+        data, from_cache = _fetch_kev_catalog(fetcher)
     except Exception as exc:
         result["status"] = "fetch_failed"
         result["reason"] = str(exc) or exc.__class__.__name__
         return result
+    result["from_cache"] = bool(from_cache)
+    result["catalog_version"] = str(
+        (data or {}).get("catalogVersion") or "")
     vendors = inventory_vendors(devices)
     tokens = set(vendors) | _device_tokens(devices)
     if vendor:
@@ -1220,6 +1510,88 @@ def _fixture_kev_fetcher(url):
     return _load_fixture_json("kev_fixture.json")
 
 
+def _derived_sources(item):
+    # type: (Dict[str, Any]) -> List[str]
+    """An item's feed sources: its explicit "sources" when set,
+    else derived (["KEV"] for a KEV-flagged item, ["NVD"] when it
+    names a CVE). Upload-shaped items derive []."""
+    explicit = (item or {}).get("sources")
+    if explicit:
+        return [str(source) for source in explicit]
+    if (item or {}).get("kev"):
+        return ["KEV"]
+    if _item_cve_id(item or {}):
+        return ["NVD"]
+    return []
+
+
+def _merge_kev_fields(target, kev_item):
+    # type: (Dict[str, Any], Dict[str, Any]) -> Dict[str, Any]
+    """Merge a KEV item's facts into its NVD twin (mutates and
+    returns the NVD item): the known-exploited flag, due/date
+    fields and the previously dropped required action /
+    ransomware / vulnerability name ride as structured fields,
+    and the KEV block is appended to the text - its first lines
+    keep the existing wording verbatim, the two new lines are
+    additive. Ranges, published date, severity rank, label and
+    URL stay the NVD item's (the severity pin is deliberate:
+    KEV priority comes from the kev flag sort, not severity)."""
+    target["kev"] = True
+    target["due_date"] = kev_item.get("due_date") or ""
+    target["date_added"] = kev_item.get("date_added") or ""
+    target["required_action"] = kev_item.get("required_action") or ""
+    target["ransomware"] = kev_item.get("ransomware") or ""
+    target["vuln_name"] = kev_item.get("vuln_name") or ""
+    sources = []  # type: List[str]
+    for source in _derived_sources(target) + _derived_sources(kev_item):
+        if source not in sources:
+            sources.append(source)
+    ordered = [s for s in ("NVD", "KEV") if s in sources]
+    ordered += [s for s in sources if s not in ordered]
+    target["sources"] = ordered
+    target["text"] = (
+        str(target.get("text") or "")
+        + "\n\nCISA KEV: this CVE is in the Known Exploited "
+          "Vulnerabilities catalog.\nDate added: %s\nDue date: %s"
+          "\nRequired action: %s\nKnown ransomware use: %s"
+        % (kev_item.get("date_added") or "",
+           kev_item.get("due_date") or "",
+           kev_item.get("required_action") or "",
+           kev_item.get("ransomware") or ""))
+    return target
+
+
+def merge_feed_items(nvd_items, kev_items):
+    # type: (List[Dict[str, Any]], List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]
+    """The one shared feed merge: one CVE is one item however
+    many feeds name it. NVD items form the base; a KEV item for
+    the same CVE merges in place via _merge_kev_fields; KEV-only
+    items append. Every returned item is stamped with its
+    "sources". Returns (items, {"kev_merged", "kev_only"})."""
+    items = []  # type: List[Dict[str, Any]]
+    by_cve = {}  # type: Dict[str, Dict[str, Any]]
+    for item in nvd_items or []:
+        items.append(item)
+        cve_id = _item_cve_id(item)
+        if cve_id:
+            by_cve[cve_id] = item
+    kev_merged = 0
+    kev_only = 0
+    for kev_item in kev_items or []:
+        cve_id = _item_cve_id(kev_item)
+        target = by_cve.get(cve_id) if cve_id else None
+        if target is None:
+            items.append(kev_item)
+            kev_only += 1
+            continue
+        _merge_kev_fields(target, kev_item)
+        kev_merged += 1
+    for item in items:
+        if not item.get("sources"):
+            item["sources"] = _derived_sources(item)
+    return items, {"kev_merged": kev_merged, "kev_only": kev_only}
+
+
 def collect_feed_items(devices, mock=False, nvd_fetcher=None,
                        kev_fetcher=None, vendor=None):
     # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[str]) -> Dict[str, Any]
@@ -1239,8 +1611,12 @@ def collect_feed_items(devices, mock=False, nvd_fetcher=None,
                             vendor=vendor)
     kev = collect_kev_items(devices, fetcher=kev_fetcher,
                             vendor=vendor)
-    return {"items": list(nvd["items"]) + list(kev["items"]),
-            "nvd": nvd, "kev": kev}
+    items, merge_stats = merge_feed_items(nvd["items"], kev["items"])
+    stats = {"nvd_count": nvd["count"], "kev_count": kev["count"],
+             "kev_merged": merge_stats["kev_merged"],
+             "kev_only": merge_stats["kev_only"],
+             "total": len(items)}  # type: Dict[str, Any]
+    return {"items": items, "nvd": nvd, "kev": kev, "stats": stats}
 
 
 # ---------------------------------------------------------------------------
@@ -1266,7 +1642,7 @@ NVD_WINDOW_DAYS = 119
 NVD_PAGE_SIZE = 500
 NVD_VENDOR_YEAR_CAP = 1000
 KEV_YEAR_CAP = 300
-FEED_SLEEP_SECONDS = 0.7
+FEED_SLEEP_SECONDS = 0.65  # deprecated alias of NVD_SLEEP_WITH_KEY
 FULL_TRIAGE_CAP = 30
 JUDGE_ALL_CAP = 200
 # Candidates traced for the post-trace re-screen in one pipeline
@@ -1316,6 +1692,68 @@ def _emit_progress(progress, index, total, label):
 CREDIT_STRINGS = {
     "en": "Not judged - Clocked API credits exhausted.",
     "ko": "판정되지 않음 - Clocked API 크레딧이 소진되었습니다.",
+}
+
+# KEV local-screen strings (kind "kev_unconfirmed"): a KEV-listed
+# product match with no version range from any source earns a
+# dedicated CANNOT DETERMINE reason + checklist, never a firmer
+# verdict - KEV membership is priority evidence, not version
+# evidence (design rules K-2 / K-A / K-C).
+KEV_STRINGS = {
+    "en": {
+        "reason": ("In CISA KEV (known exploited) for %s, but "
+                   "neither KEV, NVD, nor the vendor original "
+                   "states affected versions - version %s cannot "
+                   "be confirmed or cleared from structured "
+                   "evidence."),
+        "condition": ("KEV-listed product matches this device; "
+                      "confirm the installed version is not "
+                      "affected (no version range is published "
+                      "in KEV)."),
+        "check_version": ("Confirm the exact installed version "
+                          "of %s on each candidate device "
+                          "against the vendor advisory for this "
+                          "CVE."),
+        "check_action": ("Apply the KEV required action by the "
+                         "due date %s: %s"),
+        "check_ransomware": ("KEV marks this CVE as known "
+                             "ransomware use - check for "
+                             "compromise indicators before "
+                             "routine patching."),
+        "warn_overdue": ("KEV due date %s has passed - treat "
+                         "as overdue until the version check "
+                         "clears each device."),
+        "warn_ransomware": ("Known ransomware use (CISA KEV) - "
+                            "prioritise the version check."),
+        "action": ("Verify versions manually for %s: this CVE "
+                   "is in CISA KEV (known exploited) but no "
+                   "source publishes an affected-version range, "
+                   "so local screening cannot settle it."),
+    },
+    "ko": {
+        "reason": ("CISA KEV(악용 확인)에 등재된 %s 취약점이지만 "
+                   "KEV·NVD·제조사 원문 어디에도 영향 버전 범위가 "
+                   "없어 버전 %s을(를) 구조화 근거로 확정도 제외도 "
+                   "할 수 없습니다."),
+        "condition": ("KEV 등재 제품이 이 장비와 일치합니다. 설치 "
+                      "버전이 영향받지 않는지 확인하세요(KEV에는 "
+                      "버전 범위가 없습니다)."),
+        "check_version": ("후보 장비마다 %s의 정확한 설치 버전을 "
+                          "이 CVE의 제조사 권고와 대조해 확인하세요."),
+        "check_action": ("기한 %s까지 KEV 필수 조치를 적용하세요: %s"),
+        "check_ransomware": ("KEV가 이 CVE를 랜섬웨어 악용으로 "
+                             "표시합니다 - 정기 패치 전에 침해 "
+                             "지표부터 확인하세요."),
+        "warn_overdue": ("KEV 기한 %s이(가) 지났습니다 - 버전 "
+                         "확인으로 각 장비가 제외될 때까지 기한 "
+                         "초과로 취급하세요."),
+        "warn_ransomware": ("랜섬웨어 악용 확인(CISA KEV) - 버전 "
+                            "확인을 우선하세요."),
+        "action": ("%s 버전을 수동으로 확인하세요: 이 CVE는 CISA "
+                   "KEV(악용 확인)에 등재됐지만 어떤 소스도 영향 "
+                   "버전 범위를 공개하지 않아 로컬 스크리닝으로 "
+                   "확정할 수 없습니다."),
+    },
 }
 
 
@@ -1391,12 +1829,15 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
     reports like every other stage instead of leaving the UI on
     a static spinner.
     """
-    fetch = fetcher or _fetch_json
+    has_key = bool(_nvd_api_key())
+    fetch = _nvd_fetcher(fetcher, has_key)
     queries = ([_vendor_query_term(vendor, devices)] if vendor
                else _nvd_query_terms(devices))
     result = {"items": [], "status": "empty", "count": 0,
               "queries": queries, "reason": "", "windows": 0,
-              "truncated": False}  # type: Dict[str, Any]
+              "truncated": False,
+              "rate_budget": "key" if has_key else "no-key",
+              "requests_made": 0}  # type: Dict[str, Any]
     if not queries:
         result["status"] = "no_vendors"
         return result
@@ -1414,11 +1855,16 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
         # type: (str) -> Any
         if sleep is not None and requests_made[0] > 0:
             try:
-                sleep(FEED_SLEEP_SECONDS)
+                sleep(_nvd_sleep_seconds(has_key))
             except Exception:
                 pass
-        requests_made[0] += 1
-        return fetch(url)
+
+        def counting_fetch(target_url):
+            # type: (str) -> Any
+            requests_made[0] += 1
+            return fetch(target_url)
+
+        return _fetch_with_retry(counting_fetch, url, sleep)
 
     for term in queries:
         vendor_count = 0
@@ -1476,6 +1922,7 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
             items.append(item)
     items.sort(key=lambda it: str(it.get("published") or ""),
                reverse=True)
+    result["requests_made"] = requests_made[0]
     result["items"] = items
     result["count"] = len(items)
     if items:
@@ -1534,38 +1981,14 @@ def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
         progress, total_windows, total_windows,
         PROGRESS_STRINGS[_normalize_lang(lang)]["collecting_kev"]
         % int(kev.get("count") or 0))
-    items = []  # type: List[Dict[str, Any]]
-    by_cve = {}  # type: Dict[str, Dict[str, Any]]
-    for item in nvd["items"]:
-        items.append(item)
-        cve_id = _item_cve_id(item)
-        if cve_id:
-            by_cve[cve_id] = item
-    kev_merged = 0
-    kev_only = 0
-    for kev_item in kev["items"]:
-        cve_id = _item_cve_id(kev_item)
-        target = by_cve.get(cve_id) if cve_id else None
-        if target is None:
-            items.append(kev_item)
-            kev_only += 1
-            continue
-        target["kev"] = True
-        target["due_date"] = kev_item.get("due_date") or ""
-        target["date_added"] = kev_item.get("date_added") or ""
-        target["text"] = (
-            str(target.get("text") or "")
-            + "\n\nCISA KEV: this CVE is in the Known Exploited "
-              "Vulnerabilities catalog.\nDate added: %s\nDue date: %s"
-            % (kev_item.get("date_added") or "",
-               kev_item.get("due_date") or ""))
-        kev_merged += 1
+    items, merge_stats = merge_feed_items(nvd["items"], kev["items"])
     nvd_info = {key: value for key, value in nvd.items()
                 if key != "items"}
     kev_info = {key: value for key, value in kev.items()
                 if key != "items"}
     stats = {"nvd_count": nvd["count"], "kev_count": kev["count"],
-             "kev_merged": kev_merged, "kev_only": kev_only,
+             "kev_merged": merge_stats["kev_merged"],
+             "kev_only": merge_stats["kev_only"],
              "kev_older_excluded": kev.get("older_excluded", 0),
              "total": len(items), "windows": nvd.get("windows", 0),
              "truncated": bool(nvd.get("truncated"))}
@@ -1603,8 +2026,11 @@ _PRODUCT_KEY_DISPLAY = {
     "cisco ios xe": "Cisco IOS XE",
     "cisco ios": "Cisco IOS",
     "cisco nx-os": "Cisco NX-OS",
+    "cisco asa-ftd": "Cisco ASA / FTD",
     "juniper junos": "Juniper Junos OS",
+    "juniper junos evolved": "Juniper Junos OS Evolved",
     "arista eos": "Arista EOS",
+    "arista cloudvision": "Arista CloudVision",
     "nokia sr os": "Nokia SR OS",
     "extreme exos": "Extreme EXOS",
     "f5 big-ip": "F5 BIG-IP",
@@ -1622,7 +2048,12 @@ _PRODUCT_KEY_DISPLAY = {
 _TEXT_PRODUCT_PHRASES = [
     ("ios xe", "cisco ios xe"), ("ios-xe", "cisco ios xe"),
     ("nx-os", "cisco nx-os"), ("nx os", "cisco nx-os"),
+    ("junos os evolved", "juniper junos evolved"),
+    ("junos evolved", "juniper junos evolved"),
     ("junos", "juniper junos"),
+    ("cloudvision", "arista cloudvision"),
+    ("cvp", "arista cloudvision"),
+    ("firepower", "cisco asa-ftd"), ("asa", "cisco asa-ftd"),
     ("big-ip", "f5 big-ip"), ("bigip", "f5 big-ip"),
     ("pan-os", "palo alto pan-os"),
     ("fortios", "fortinet fortios"),
@@ -1656,6 +2087,9 @@ def _cpe_product_key(vendor, product):
     back to token overlap via triage.product_matches."""
     p = str(product or "").lower().replace("_", "-")
     v = str(vendor or "").lower()
+    if "junos" in p and ("evolved" in p or "_evo" in p
+                         or p.endswith("-evo")):
+        return "juniper junos evolved"
     if "junos" in p:
         return "juniper junos"
     if "ios-xe" in p:
@@ -1664,6 +2098,12 @@ def _cpe_product_key(vendor, product):
         return "cisco nx-os"
     if p == "ios" and "cisco" in v:
         return "cisco ios"
+    if (p in ("asa", "ftd", "adaptive-security-appliance")
+            or p.startswith("firepower")
+            or p.startswith("secure-firewall")):
+        return "cisco asa-ftd"
+    if p in ("cloudvision", "cvp", "cloudvision-portal"):
+        return "arista cloudvision"
     if p == "eos" and ("arista" in v or not v):
         return "arista eos"
     if p.startswith("big-ip"):
@@ -1704,13 +2144,28 @@ def _device_product_keys(device):
     it only when BOTH families' ranges exclude its version -
     a false candidate is cheaper than a false clear."""
     model = str((device or {}).get("model") or "")
+    version = str((device or {}).get("version") or "")
     lowered = model.lower()
+    combined = (model + " " + version).lower()
     vendor = _device_vendor(device)
     keys = set()  # type: Set[str]
-    if vendor == "juniper" or "junos" in lowered:
+    evolved = ("evolved" in combined
+               or re.search(r"-evo\b|\bevo\b", combined))
+    if evolved and (vendor == "juniper" or "junos" in combined
+                    or vendor is not None and "junos" in lowered):
+        keys.add("juniper junos evolved")
+    elif vendor == "juniper" or "junos" in lowered:
         keys.add("juniper junos")
-    if vendor == "arista" or re.search(r"\beos\b", lowered):
+    cloudvision = ("cloudvision" in lowered
+                   or re.search(r"\bcvp\b", lowered))
+    if cloudvision:
+        keys.add("arista cloudvision")
+    if not cloudvision and (vendor == "arista"
+                            or re.search(r"\beos\b", lowered)):
         keys.add("arista eos")
+    if ("firepower" in lowered or "secure firewall" in lowered
+            or re.search(r"\basa\d|\basa\b|\bftd\b", lowered)):
+        keys.add("cisco asa-ftd")
     if vendor == "nokia" or "sr os" in lowered or "sros" in lowered:
         keys.add("nokia sr os")
     if vendor == "extreme" or "exos" in lowered:
@@ -1746,7 +2201,17 @@ def _eval_range(device_version, rng):
     letter suffixes - triage._compare_versions refuses to guess
     those, and so does the screen)."""
     if rng.get("exact"):
-        return version_matches(device_version, str(rng["exact"]))
+        result = version_matches(device_version, str(rng["exact"]))
+        if result is False and "*" not in str(rng["exact"]) \
+                and "-" not in str(rng["exact"]) \
+                and _compare_versions(
+                    device_version, str(rng["exact"])) is None:
+            # A plain exact version whose comparison cannot be
+            # made (numeric tie with differing letter suffixes,
+            # e.g. EOS 4.30.5F vs 4.30.5M) is inconclusive, never
+            # a clear (invariant I-2).
+            return None
+        return result
     checks = []  # type: List[Optional[bool]]
     bounds = (
         ("start_including", lambda c: c >= 0),
@@ -1839,7 +2304,14 @@ def _screen_item(item, devices, device_keys_list):
         if any(outcome is True for outcome in outcomes):
             evals.append("hit")
         elif all(outcome is False for outcome in outcomes):
-            evals.append("cleared")
+            # A clear from partially parsed ranges (JSA prose
+            # extraction) is not evidence of absence: downgrade
+            # to uncertain. A hit from a partial range stays a
+            # hit - the device is inside a stated branch.
+            if any(rng.get("partial") for rng in device_ranges):
+                evals.append("uncertain")
+            else:
+                evals.append("cleared")
         else:
             evals.append("uncertain")
 
@@ -1912,8 +2384,8 @@ def _evaluate_item(item, devices, device_keys_list=None):
 
 
 def _make_local_entry(item, devices, evaluation, kind, lang,
-                      budget=0):
-    # type: (Dict[str, Any], List[Dict[str, str]], Dict[str, Any], str, str, int) -> Dict[str, Any]
+                      budget=0, today=None):
+    # type: (Dict[str, Any], List[Dict[str, str]], Dict[str, Any], str, str, int, Optional[datetime.date]) -> Dict[str, Any]
     """Build a batch entry whose triage result was produced
     LOCALLY (no Clocked calls), in the exact run_triage result
     shape the renderer and the action summary consume.
@@ -1921,8 +2393,14 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
     kind "not_affected": screening cleared every related device -
     verdict NOT AFFECTED. kind "budget": a candidate the deep-
     triage budget did not reach - verdict CANNOT DETERMINE with
-    the reason stated plainly. Both carry basis "local-screen"
-    and the "Local version-range screen" source label."""
+    the reason stated plainly. kind "kev_unconfirmed": a KEV item
+    whose product matches but for which no source publishes a
+    version range - verdict CANNOT DETERMINE with the dedicated
+    KEV reason, condition and checklist (KEV membership alone
+    never settles a version verdict). All carry basis
+    "local-screen" and the "Local version-range screen" source
+    label. `today` (a datetime.date) drives the overdue-due-date
+    warning deterministically; it defaults to the real today."""
     lang = _normalize_lang(lang)
     reasons = REASON_STRINGS[lang]
     displays = evaluation.get("displays") or []
@@ -1948,6 +2426,11 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
                 "Version %s is outside every vendor-published "
                 "affected range for %s (local version-range screen; "
                 "no API calls)." % (version, product_label)))
+        elif kind == "kev_unconfirmed":
+            device_rows.append(_row(
+                hostname, model, version, True, VERDICT_CANNOT,
+                KEV_STRINGS[lang]["reason"] % (product_label,
+                                               version)))
         elif ev == "hit":
             device_rows.append(_row(
                 hostname, model, version, True, VERDICT_CANNOT,
@@ -1971,6 +2454,30 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
         checklist = generate_checklist(VERDICT_NOT_AFFECTED,
                                        "monitor", lang=lang)
         warnings = []  # type: List[str]
+        conditions = []  # type: List[str]
+    elif kind == "kev_unconfirmed":
+        kev_strings = KEV_STRINGS[lang]
+        action_required = kev_strings["action"] % product_label
+        conditions = [kev_strings["condition"]]
+        kev_steps = [kev_strings["check_version"] % product_label]
+        due_date = str((item or {}).get("due_date") or "")
+        required_action = str((item or {}).get("required_action")
+                              or "")
+        if due_date or required_action:
+            kev_steps.append(kev_strings["check_action"] % (
+                due_date or "the KEV due date", required_action))
+        ransomware = str((item or {}).get("ransomware") or "")
+        if ransomware == "Known":
+            kev_steps.append(kev_strings["check_ransomware"])
+        checklist = kev_steps + generate_checklist(
+            VERDICT_CANNOT, "monitor", lang=lang)
+        warnings = []
+        run_today = today or datetime.date.today()
+        due_parsed = _parse_iso_date(due_date)
+        if due_parsed is not None and due_parsed < run_today:
+            warnings.append(kev_strings["warn_overdue"] % due_date)
+        if ransomware == "Known":
+            warnings.append(kev_strings["warn_ransomware"])
     else:
         action_required = (
             "Confirm the affected versions for %s manually, or "
@@ -1983,6 +2490,7 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
             "Deep-triage budget reached: this verdict comes from "
             "local screening only - no Clocked calls were spent "
             "on this item."]
+        conditions = []
     ranges = (item or {}).get("cpe_ranges") or []
     vendor_text = ""
     if ranges and isinstance(ranges[0], dict):
@@ -2019,7 +2527,7 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
         "verdict": verdict,
         "urgency": "monitor",
         "warnings": warnings,
-        "conditions": [],
+        "conditions": conditions,
         "claim": build_claim(verdict, device_rows, extracted),
         "checklist": checklist,
         "clocked_calls": 0,
@@ -2030,15 +2538,21 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
         if line.strip():
             hint = line.strip()[:80]
             break
-    return {"url": str((item or {}).get("url") or ""),
-            "label": label,
-            "status": "ok",
-            "text_hint": hint,
-            "source_label": LOCAL_SCREEN_LABEL,
-            "basis": "local-screen",
-            "kev": bool((item or {}).get("kev")),
-            "published": str((item or {}).get("published") or ""),
-            "triage": triage_result}
+    entry = {"url": str((item or {}).get("url") or ""),
+             "label": label,
+             "status": "ok",
+             "text_hint": hint,
+             "source_label": LOCAL_SCREEN_LABEL,
+             "basis": "local-screen",
+             "kev": bool((item or {}).get("kev")),
+             "published": str((item or {}).get("published") or ""),
+             "sources": _derived_sources(item or {}),
+             "triage": triage_result}  # type: Dict[str, Any]
+    if kind == "kev_unconfirmed":
+        # Only local KEV rows carry an entry-level due date (the
+        # detail view's KEV-due source badge keys on it).
+        entry["due_date"] = str((item or {}).get("due_date") or "")
+    return entry
 
 
 def screen_feed_items(items, inventory_text, lang="en"):
@@ -2062,8 +2576,15 @@ def screen_feed_items(items, inventory_text, lang="en"):
     candidates = []  # type: List[Dict[str, Any]]
     stats = {"collected": len(items or []), "not_in_fleet": 0,
              "local_not_affected": 0, "candidates": 0,
-             "uncertain_candidates": 0}  # type: Dict[str, Any]
+             "uncertain_candidates": 0,
+             "unmapped_products": 0}  # type: Dict[str, Any]
+    unmapped_seen = set()  # type: Set[str]
     for item in items or []:
+        for rng in _merged_ranges_item(item).get("cpe_ranges") or []:
+            if isinstance(rng, dict) and _cpe_product_key(
+                    rng.get("vendor"), rng.get("product")) is None:
+                unmapped_seen.add("%s:%s" % (
+                    rng.get("vendor") or "", rng.get("product") or ""))
         evaluation = _evaluate_item(item, devices, device_keys_list)
         outcome = evaluation["outcome"]
         if outcome == "out":
@@ -2077,6 +2598,7 @@ def screen_feed_items(items, inventory_text, lang="en"):
             stats["candidates"] += 1
             if not evaluation["has_hit"]:
                 stats["uncertain_candidates"] += 1
+    stats["unmapped_products"] = len(unmapped_seen)
     return local_rows, candidates, stats
 
 
@@ -2208,6 +2730,29 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
             continue
         survivors.append(item)
     survivors.extend(ordered[TRACE_SCREEN_CAP:])
+    # K-2 partition: a KEV survivor with no version range from
+    # any source (NVD, KEV itself, or a trace) becomes a local
+    # kev_unconfirmed row - deep triage cannot manufacture
+    # version evidence from a range-less text, so it spends no
+    # budget here and the freed slots flow to range-bearing
+    # candidates.
+    run_today = (now or datetime.datetime.now(
+        datetime.timezone.utc)).date()
+    kev_local_items = []  # type: List[Dict[str, Any]]
+    rest = []  # type: List[Dict[str, Any]]
+    for survivor in survivors:
+        if survivor.get("kev") and not _merged_ranges_item(
+                survivor)["cpe_ranges"]:
+            kev_local_items.append(survivor)
+        else:
+            rest.append(survivor)
+    for kev_item in kev_local_items:
+        evaluation = _evaluate_item(kev_item, devices,
+                                    device_keys_list)
+        rows.append(_make_local_entry(
+            _merged_ranges_item(kev_item), devices, evaluation,
+            "kev_unconfirmed", lang, today=run_today))
+    survivors = rest
     judged_items = survivors[:budget]
     over_items = survivors[budget:]
     entries = run_batch_items(
@@ -2223,6 +2768,7 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     for item, entry in zip(judged_items, entries):
         entry["kev"] = bool((item or {}).get("kev"))
         entry["published"] = str((item or {}).get("published") or "")
+        entry["sources"] = _derived_sources(item or {})
         rows.append(entry)
     for item in over_items:
         evaluation = _evaluate_item(item, devices, device_keys_list)
@@ -2234,6 +2780,7 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     rows.sort(key=_entry_verdict_rank)
     rows.sort(key=lambda e: 0 if e.get("kev") else 1)
     screen_stats["local_not_affected"] += rescreened
+    reachability = {} if mock else probe_sources()
     stats = {"nvd": feed["nvd"], "kev": feed["kev"],
              "vendor": vendor,
              "collection": feed["stats"], "screening": screen_stats,
@@ -2242,6 +2789,8 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
              "traced_for_screen": trace_stats.get("attempted", 0),
              "rescreened_not_affected": rescreened,
              "deep_triaged": len(judged_items),
+             "kev_unconfirmed": len(kev_local_items),
+             "reachability": reachability,
              "budget": budget,
              "candidates": len(candidates),
              "credit_exhausted": credit_exhausted}
@@ -2719,19 +3268,270 @@ def _csaf_traced_ranges(data, cve_id, cap=40):
     return ranges
 
 
+CISCO_CSAF_RSS_URL = ("https://sec.cloudapps.cisco.com/security/"
+                      "center/csaf_20.xml")
+JUNIPER_JSA_PROBE_URL = "https://supportportal.juniper.net/JSA73153"
+ARISTA_CSAF_PROBE_URL = (
+    "https://www.arista.com/assets/data/SecurityAdvisories/CSAF/"
+    "arista_networks_security_advisory_199_CSAF.json")
+PROBE_TTL_SECONDS = 300
+
+_JSA_MARKERS = ("junos", "jsa", "affected", "prior to", "problem:",
+                "workaround")
+
+
+def _jsa_is_genuine(text, url):
+    # type: (Any, Any) -> bool
+    """True only when a fetched JSA page is the genuine article:
+    the JSA id derived from the URL appears in the text AND at
+    least one advisory marker is present. The measured CEC
+    Juniper Community portal shell is long and mentions Juniper,
+    but never names the article's JSA id - length alone and
+    vendor name alone both pass it, so neither suffices."""
+    body = str(text or "")
+    if not body:
+        return False
+    url_text = str(url or "")
+    match = re.search(r"JSA\d+", url_text, re.IGNORECASE)
+    jsa_id = match.group(0) if match else ""
+    if not jsa_id:
+        slug = re.search(r"/s/article/\S*?(\d{4,})", url_text)
+        jsa_id = slug.group(1) if slug else ""
+    if not jsa_id:
+        return False
+    lowered = body.lower()
+    if jsa_id.lower() not in lowered:
+        return False
+    return any(marker in lowered for marker in _JSA_MARKERS)
+
+
+_JSA_VERSION_TOKEN_RE = re.compile(
+    r"\d+(?:\.\d+)+(?:[A-Za-z][0-9A-Za-z.\-]*)?"
+    r"|\d+[A-Za-z][0-9A-Za-z.\-]*")
+_JSA_BOUND_INCLUSIVE = ("and earlier", "up to and including")
+_JSA_BOUND_EXCLUSIVE = ("prior to", "before", "earlier than")
+
+
+def _jsa_version_tokens(line):
+    # type: (str) -> List[str]
+    """Version tokens on one JSA line, in order (a local helper
+    in the shape of triage's version-token normaliser: digit-led
+    tokens such as 21.2 or 21.2R3-S7)."""
+    return _JSA_VERSION_TOKEN_RE.findall(str(line or ""))
+
+
+def _jsa_traced_ranges(text):
+    # type: (Any) -> List[Dict[str, Any]]
+    """Deterministic affected ranges from JSA prose, scoped to
+    the bound-phrase family the matcher already trusts ("prior
+    to" / "before" / "earlier than" -> end-exclusive; "and
+    earlier" / "up to and including" -> end-inclusive). The
+    bound is the LAST version token on a kept line; the FIRST
+    token is the branch base when the line also names versions
+    ("21.2 versions prior to 21.2R3-S7" -> [21.2, 21.2R3-S7)).
+    Every range is stamped "partial": True - extraction may
+    convict (a hit stays a hit) but never acquit (the screen
+    downgrades partial clears to uncertain). Conservative
+    abort: a version-bearing releases/versions line near a kept
+    line that itself yields no range voids the whole extraction.
+    Classic Junos only; Evolved is out of scope here."""
+    lines = []  # type: List[str]
+    for chunk in str(text or "").splitlines():
+        lines.extend(part.strip() for part in chunk.split(";"))
+    kept = {}  # type: Dict[int, Dict[str, Any]]
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+        inclusive = any(phrase in lowered
+                        for phrase in _JSA_BOUND_INCLUSIVE)
+        exclusive = any(phrase in lowered
+                        for phrase in _JSA_BOUND_EXCLUSIVE)
+        if not (inclusive or exclusive):
+            continue
+        tokens = _jsa_version_tokens(line)
+        if not tokens:
+            continue
+        rng = {"vendor": "Juniper Networks", "product": "Junos OS",
+               "exact": None, "start_including": None,
+               "start_excluding": None, "end_including": None,
+               "end_excluding": None,
+               "partial": True}  # type: Dict[str, Any]
+        if inclusive:
+            rng["end_including"] = tokens[-1]
+        else:
+            rng["end_excluding"] = tokens[-1]
+        if len(tokens) >= 2 and "version" in lowered:
+            rng["start_including"] = tokens[0]
+        kept[index] = rng
+    if not kept:
+        return []
+    for index, line in enumerate(lines):
+        if index in kept:
+            continue
+        lowered = line.lower()
+        if ("releases" in lowered or "versions" in lowered) \
+                and _jsa_version_tokens(line) \
+                and any(abs(index - kept_index) <= 3
+                        for kept_index in kept):
+            return []
+    return [kept[index] for index in sorted(kept)]
+
+
+def probe_sources(fetcher=None, json_fetcher=None, text_fetcher=None,
+                  now=None):
+    # type: (Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[str], str]], Optional[datetime.datetime]) -> Dict[str, Dict[str, Any]]
+    """Probe each feed/vendor source's reachability IN THIS
+    environment and classify the outcome honestly: HTTP 200 is
+    not success - bodies are validated (JSON shape, RSS markers,
+    the JSA genuine test, the CNA record id). Returns {source:
+    {"status": REACH_*, "detail": str, "http_status"}} keyed
+    nvd / kev / cisco_csaf / arista_csaf / juniper_jsa / cna.
+    One source's failure never aborts the others; results are
+    cached in-process for PROBE_TTL_SECONDS. Probing spends
+    zero Clocked calls and never alters collection."""
+    cached = _FEED_CACHE.get("probe")
+    if cached is not None and isinstance(cached.get("result"), dict):
+        return cached["result"]
+    has_key = bool(_nvd_api_key())
+    if json_fetcher is not None:
+        nvd_fetch = _nvd_fetcher(json_fetcher, has_key)
+        json_fetch = json_fetcher
+    elif fetcher is not None:
+        nvd_fetch = fetcher
+        json_fetch = fetcher
+    else:
+        nvd_fetch = _nvd_fetcher(None, has_key)
+        json_fetch = _fetch_json
+    if text_fetcher is not None:
+        text_fetch = text_fetcher
+    elif fetcher is not None:
+        text_fetch = fetcher
+    else:
+        def text_fetch(url):
+            # type: (str) -> str
+            return _fetch_raw(url)[0]
+
+    def failed(exc):
+        # type: (Exception) -> Dict[str, Any]
+        return {"status": _classify_error(exc),
+                "detail": str(exc) or exc.__class__.__name__,
+                "http_status": getattr(exc, "status", None)}
+
+    result = {}  # type: Dict[str, Dict[str, Any]]
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    pub_start, pub_end = _nvd_recent_window(moment)
+    nvd_url = NVD_API_URL + "?" + urllib.parse.urlencode(
+        {"keywordSearch": "Cisco", "resultsPerPage": 1,
+         "pubStartDate": pub_start, "pubEndDate": pub_end})
+    try:
+        data = _fetch_with_retry(nvd_fetch, nvd_url, None)
+        if isinstance(data, dict) and "vulnerabilities" in data \
+                and "totalResults" in data:
+            result["nvd"] = {
+                "status": REACH_OK,
+                "detail": "totalResults: %s" % data.get("totalResults"),
+                "http_status": 200}
+        else:
+            result["nvd"] = {"status": REACH_INVALID,
+                             "detail": "unexpected NVD response shape",
+                             "http_status": 200}
+    except Exception as exc:
+        result["nvd"] = failed(exc)
+    try:
+        if json_fetcher is not None or fetcher is not None:
+            kev_data = json_fetch(KEV_FEED_URL)
+        else:
+            kev_data, _from_cache = _fetch_kev_catalog(None)
+        catalog_version = str((kev_data or {}).get("catalogVersion")
+                              or "")
+        if isinstance((kev_data or {}).get("vulnerabilities"), list) \
+                and catalog_version:
+            result["kev"] = {"status": REACH_OK,
+                             "detail": catalog_version,
+                             "http_status": 200}
+        else:
+            result["kev"] = {"status": REACH_INVALID,
+                             "detail": "missing catalogVersion",
+                             "http_status": 200}
+    except Exception as exc:
+        result["kev"] = failed(exc)
+    try:
+        body = str(text_fetch(CISCO_CSAF_RSS_URL) or "")
+        if ("<rss" in body or "<feed" in body) \
+                and "csaf" in body.lower():
+            result["cisco_csaf"] = {"status": REACH_OK, "detail": "",
+                                    "http_status": 200}
+        elif _looks_like_html(body, ""):
+            result["cisco_csaf"] = {
+                "status": REACH_CHALLENGE,
+                "detail": "HTML page, not the CSAF RSS feed",
+                "http_status": 200}
+        else:
+            result["cisco_csaf"] = {
+                "status": REACH_INVALID,
+                "detail": "no RSS/feed body with CSAF links",
+                "http_status": 200}
+    except Exception as exc:
+        result["cisco_csaf"] = failed(exc)
+    try:
+        arista_data = json_fetch(ARISTA_CSAF_PROBE_URL)
+        if isinstance(arista_data, dict) \
+                and "document" in arista_data \
+                and "vulnerabilities" in arista_data:
+            result["arista_csaf"] = {"status": REACH_OK, "detail": "",
+                                     "http_status": 200}
+        else:
+            result["arista_csaf"] = {
+                "status": REACH_INVALID,
+                "detail": "unexpected CSAF response shape",
+                "http_status": 200}
+    except Exception as exc:
+        result["arista_csaf"] = failed(exc)
+    try:
+        jsa_body = str(text_fetch(JUNIPER_JSA_PROBE_URL) or "")
+        if _jsa_is_genuine(jsa_body, JUNIPER_JSA_PROBE_URL):
+            result["juniper_jsa"] = {"status": REACH_OK, "detail": "",
+                                     "http_status": 200}
+        else:
+            result["juniper_jsa"] = {
+                "status": REACH_CHALLENGE,
+                "detail": "portal shell, not the JSA article",
+                "http_status": 200}
+    except Exception as exc:
+        result["juniper_jsa"] = failed(exc)
+    try:
+        cna_data = json_fetch(cvelist_url("CVE-2023-36844"))
+        record_id = str(((cna_data or {}).get("cveMetadata") or {}
+                         ).get("cveId") or "")
+        if record_id.upper() == "CVE-2023-36844":
+            result["cna"] = {"status": REACH_OK, "detail": "",
+                             "http_status": 200}
+        else:
+            result["cna"] = {"status": REACH_INVALID,
+                             "detail": "CNA record id mismatch",
+                             "http_status": 200}
+    except Exception as exc:
+        result["cna"] = failed(exc)
+    _FEED_CACHE.put("probe", {"result": result}, PROBE_TTL_SECONDS)
+    return result
+
+
 def _trace_one(item, text_fetch, json_fetch):
     # type: (Dict[str, Any], Callable[[str], str], Callable[[str], Any]) -> Optional[Tuple[str, str, str, List[Dict[str, Any]]]]
     """Follow one item to its vendor original. Returns
-    (vendor_text, source_url, source_label, traced_ranges) or
-    None when every route fails. traced_ranges are the vendor
-    document's affected ranges in screening range-dict shape
-    (empty for the JSA page-text route, which carries no
-    structure to parse). Route order: Cisco CSAF, Juniper JSA
-    full text, Arista CSAF, then the vendor-neutral CNA record."""
+    (vendor_text, source_url, source_label, traced_ranges,
+    was_fallback) or None when every route fails. traced_ranges
+    are the vendor document's affected ranges in screening
+    range-dict shape (the JSA route contributes its prose-parsed
+    partial ranges when the article states bound phrases).
+    was_fallback is True when an earlier matched route failed
+    and a later route succeeded. Route order: Cisco CSAF,
+    Juniper JSA full text, Arista CSAF, then the vendor-neutral
+    CNA record."""
     cve_id = _item_cve_id(item)
     if not cve_id:
         return None
     refs = _item_references(item)
+    failed_route = False
     csaf_url = _cisco_csaf_url(refs)
     if csaf_url:
         data = None  # type: Any
@@ -2743,17 +3543,21 @@ def _trace_one(item, text_fetch, json_fetch):
             text = ""
         if text:
             return (text, csaf_url, "Cisco CSAF",
-                    _csaf_traced_ranges(data, cve_id))
+                    _csaf_traced_ranges(data, cve_id), failed_route)
+        failed_route = True
     jsa_url = _juniper_jsa_url(refs)
     if jsa_url:
         try:
             fetched = text_fetch(jsa_url)
         except Exception:
             fetched = ""
-        if fetched and len(fetched) >= JSA_MIN_TEXT_CHARS:
+        if fetched and len(fetched) >= JSA_MIN_TEXT_CHARS \
+                and _jsa_is_genuine(fetched, jsa_url):
             body = ("Vendor advisory (Juniper JSA): %s\n%s"
                     % (jsa_url, fetched))[:TRACE_TEXT_CAP]
-            return body, jsa_url, "Juniper JSA", []
+            return (body, jsa_url, "Juniper JSA",
+                    _jsa_traced_ranges(fetched), failed_route)
+        failed_route = True
     arista_url = _arista_csaf_url(refs)
     if arista_url:
         data = None  # type: Any
@@ -2765,7 +3569,8 @@ def _trace_one(item, text_fetch, json_fetch):
             text = ""
         if text:
             return (text, arista_url, "Arista CSAF",
-                    _csaf_traced_ranges(data, cve_id))
+                    _csaf_traced_ranges(data, cve_id), failed_route)
+        failed_route = True
     record_url = cvelist_url(cve_id)
     if record_url:
         data = None  # type: Any
@@ -2776,7 +3581,7 @@ def _trace_one(item, text_fetch, json_fetch):
             text = ""
         if text:
             return (text, record_url, "CVE CNA record",
-                    _cna_traced_ranges(data))
+                    _cna_traced_ranges(data), failed_route)
     return None
 
 
@@ -2836,7 +3641,7 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
             text_fetch = _fixture_trace_text_fetcher
         if json_fetcher is None:
             json_fetch = _fixture_trace_json_fetcher
-    stats = {"traced": 0, "attempted": 0,
+    stats = {"traced": 0, "attempted": 0, "fallbacks": 0,
              "by_source": {}}  # type: Dict[str, Any]
     items = list(items or [])
     attempted_total = sum(
@@ -2850,7 +3655,9 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
             outcome = _trace_one(new_item, text_fetch, json_fetch)
             if outcome is not None:
                 (vendor_text, source_url, source_label,
-                 traced_ranges) = outcome
+                 traced_ranges, was_fallback) = outcome
+                if was_fallback:
+                    stats["fallbacks"] += 1
                 original_url = str(new_item.get("url") or "")
                 if original_url and original_url != source_url:
                     vendor_text += "\nNVD: %s" % original_url
@@ -3070,6 +3877,9 @@ def run_batch_items(items, devices_text, api_key=None, lang="en",
             base["source_label"] = str(item["source_label"])
         if (item or {}).get("source_url"):
             base["source_url"] = str(item["source_url"])
+        item_sources = _derived_sources(item or {})
+        if item_sources:
+            base["sources"] = item_sources
         if credit_dead:
             results.append(_credit_entry(
                 base, lang,

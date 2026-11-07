@@ -50,9 +50,16 @@ def _judged_rows(rows):
 
 def test_mock_feed_pipeline_produces_verdicts_not_errors():
     rows, stats = run_feed_pipeline(INVENTORY_TEXT, mock=True)
-    assert stats["deep_triaged"] == 4
-    judged = _judged_rows(rows)
-    assert len(judged) == 4
+    # Design section 3 (K-2): the range-less KEV-only item is a
+    # local kev_unconfirmed row in Mock Mode too - it spends no
+    # deep-triage budget, so deep_triaged is 3, not 4. Its
+    # verdict is unchanged (CANNOT DETERMINE, asserted in the
+    # spread test below).
+    assert stats["deep_triaged"] == 3
+    assert stats["kev_unconfirmed"] == 1
+    judged = [row for row in _judged_rows(rows)
+              if row["triage"]["mode"] == "mock"]
+    assert len(judged) == 3
     for row in judged:
         assert row["status"] == "ok"
         result = row["triage"]
@@ -63,6 +70,11 @@ def test_mock_feed_pipeline_produces_verdicts_not_errors():
         # come back as the canned-responses error instead.
         assert not result.get("error")
         assert result["sample_id"] in FEED_KEYS
+    kev_row = [row for row in rows
+               if row["label"] == "KEV CVE-2026-7473"][0]
+    assert kev_row["basis"] == "local-screen"
+    assert kev_row["triage"]["verdict"] == "CANNOT DETERMINE"
+    assert kev_row["triage"]["clocked_calls"] == 0
 
 
 def test_mock_feed_pipeline_verdict_spread():

@@ -299,7 +299,8 @@ def test_screen_in_range_is_candidate():
     assert [c["label"] for c in candidates] == ["CVE-2026-5001"]
     assert stats == {"collected": 1, "not_in_fleet": 0,
                      "local_not_affected": 0, "candidates": 1,
-                     "uncertain_candidates": 0}
+                     "uncertain_candidates": 0,
+                     "unmapped_products": 0}
 
 
 def test_screen_out_of_range_is_local_not_affected_row():
@@ -474,26 +475,35 @@ def test_pipeline_budget_ordering_and_exceeded_rows():
     assert stats["screening"]["candidates"] == 35
     assert stats["deep_triaged"] == FULL_TRIAGE_CAP
     assert len(rows) == 35
-    budget_rows = [r for r in rows if r.get("basis") == "local-screen"]
+    # Design section 3 (K-2): the two KEV-merged items carry no
+    # version range from any source, so they leave the judged
+    # pool as local kev_unconfirmed rows BEFORE budget slicing;
+    # the freed slots flow to the next candidates, and only the
+    # three oldest low-severity non-KEV items remain over budget.
+    assert stats["kev_unconfirmed"] == 2
+    kev_rows = [r for r in rows if r.get("due_date")]
+    assert sorted(r["label"] for r in kev_rows) == [
+        "CVE-2026-2001", "CVE-2026-2002"]
+    budget_rows = [r for r in rows
+                   if r.get("basis") == "local-screen"
+                   and not r.get("due_date")]
     triaged_rows = [r for r in rows
                     if r.get("basis") != "local-screen"]
     assert len(triaged_rows) == FULL_TRIAGE_CAP
-    assert len(budget_rows) == 5
-    # Priority is KEV > severity > recency, so the five items left
-    # beyond the budget are the oldest low-severity non-KEV ones.
+    assert len(budget_rows) == 3
     assert sorted(r["label"] for r in budget_rows) == [
-        "CVE-2026-2003", "CVE-2026-2004", "CVE-2026-2005",
-        "CVE-2026-2006", "CVE-2026-2007"]
+        "CVE-2026-2003", "CVE-2026-2004", "CVE-2026-2005"]
     triaged_labels = {r["label"] for r in triaged_rows}
     assert "CVE-2026-2000" in triaged_labels  # old but CRITICAL
-    assert "CVE-2026-2001" in triaged_labels  # KEV wins over age
-    assert "CVE-2026-2002" in triaged_labels
     for row in budget_rows:
         triage_result = row["triage"]
         assert triage_result["verdict"] == "CANNOT DETERMINE"
         assert triage_result["urgency"] == "monitor"
         assert "beyond this run's deep-triage budget" in \
             triage_result["action_required"]
+    for row in kev_rows:
+        assert row["triage"]["verdict"] == "CANNOT DETERMINE"
+        assert row["triage"]["clocked_calls"] == 0
     # Final row order: KEV first.
     assert rows[0]["kev"] is True
     assert rows[1]["kev"] is True
@@ -543,8 +553,14 @@ def test_pipeline_judge_all_lifts_budget():
              "cisco": {"vulnerabilities": []}}),
         kev_fetcher=lambda url: catalog, now=NOW)
     assert stats["budget"] == batch.JUDGE_ALL_CAP
-    assert stats["deep_triaged"] == 12
-    assert all(r.get("basis") != "local-screen" for r in rows)
+    # K-2 again: the two range-less KEV-merged items are local
+    # kev_unconfirmed rows even under Judge all - the other 10
+    # are deep-triaged.
+    assert stats["deep_triaged"] == 10
+    assert stats["kev_unconfirmed"] == 2
+    assert len(rows) == 12
+    assert sum(1 for r in rows
+               if r.get("basis") == "local-screen") == 2
 
 
 def test_pipeline_credit_exhaustion_sets_stats_flag(monkeypatch):
@@ -616,9 +632,15 @@ def test_pipeline_mock_override_beats_configured_key(monkeypatch):
     assert stats["kev"]["count"] == 1
     assert stats["credit_exhausted"] is False
     assert len(rows) == 4
-    judged = [r for r in rows if r.get("triage")]
+    judged = [r for r in rows if r.get("triage")
+              and r.get("basis") != "local-screen"]
     assert judged
     assert all(r["triage"]["mode"] == "mock" for r in judged)
+    # The range-less KEV-only fixture item is the K-2 local row
+    # (design section 3); it is not judged in any mode.
+    kev_rows = [r for r in rows if r.get("basis") == "local-screen"]
+    assert len(kev_rows) == 1
+    assert kev_rows[0]["triage"]["mode"] == "local"
 
 
 # ------------------------- stage progress --------------------------
@@ -1232,3 +1254,321 @@ def test_feeds_caption_counts_traced_candidates_not_triaged():
     # The old form ("traced of deep-triaged advisories") is gone.
     assert not any("Vendor-traced: 2 of 4 advisories" in c
                    for c in captions), captions
+
+
+# ----------------- NVD rate budget (design 1) -----------------------
+
+def test_nvd_sleep_spacing_uses_key_budget(monkeypatch):
+    empty = {"vulnerabilities": [], "totalResults": 0}
+    sleeps = []
+    monkeypatch.setenv("NVD_API_KEY", "test-only")
+    result = collect_nvd_items_year(
+        CISCO_ONLY, fetcher=_term_fetcher({"cisco": empty}),
+        sleep=sleeps.append, now=NOW)
+    assert result["rate_budget"] == "key"
+    assert sleeps and all(
+        value == batch.NVD_SLEEP_WITH_KEY for value in sleeps)
+    sleeps = []
+    monkeypatch.delenv("NVD_API_KEY", raising=False)
+    result = collect_nvd_items_year(
+        CISCO_ONLY, fetcher=_term_fetcher({"cisco": empty}),
+        sleep=sleeps.append, now=NOW)
+    assert result["rate_budget"] == "no-key"
+    assert sleeps and all(
+        value == batch.NVD_SLEEP_NO_KEY for value in sleeps)
+    assert result["requests_made"] == 4
+
+
+# ----------------- CPE mapping (design 2) ---------------------------
+
+def test_cpe_product_key_asa_ftd_and_cloudvision():
+    assert batch._cpe_product_key("cisco", "asa") == "cisco asa-ftd"
+    assert batch._cpe_product_key("cisco", "ftd") == "cisco asa-ftd"
+    assert batch._cpe_product_key(
+        "cisco", "firepower_threat_defense") == "cisco asa-ftd"
+    assert batch._cpe_product_key(
+        "arista", "cloudvision") == "arista cloudvision"
+    assert batch._cpe_product_key("cisco", "ios") == "cisco ios"
+
+
+def test_cpe_product_key_junos_evolved_is_separate():
+    assert batch._cpe_product_key(
+        "juniper", "junos_os_evolved") == "juniper junos evolved"
+    assert batch._cpe_product_key(
+        "juniper", "junos") == "juniper junos"
+
+
+def test_device_product_keys_new_families():
+    assert batch._device_product_keys(
+        {"hostname": "FW-01", "model": "ASA5516-X",
+         "version": "9.16.4"}) == {"cisco asa-ftd"}
+    assert batch._device_product_keys(
+        {"hostname": "RTR-01", "model": "MX480-EVO",
+         "version": "23.4R1-EVO"}) == {"juniper junos evolved"}
+    assert batch._device_product_keys(
+        {"hostname": "CVP-01", "model": "Arista CloudVision",
+         "version": "2023.2.1"}) == {"arista cloudvision"}
+    assert batch._device_product_keys(
+        {"hostname": "RTR-01", "model": "MX480",
+         "version": "21.3R3"}) == {"juniper junos"}
+
+
+def test_screen_evolved_range_does_not_clear_classic_junos():
+    evolved = _item("CVE-2026-6101", [
+        _rng("junos_os_evolved", vendor="juniper",
+             start_including="23.0", end_excluding="23.4")])
+    rows, candidates, _stats = screen_feed_items(
+        [evolved], "RTR-01, MX480, 21.3R3\n")
+    assert rows == []
+    classic = _item("CVE-2026-6102", [
+        _rng("junos", vendor="juniper",
+             start_including="22.0", end_excluding="22.5")])
+    rows, candidates, _stats = screen_feed_items(
+        [classic], "RTR-01, MX480-EVO, 21.3R3\n")
+    assert rows == []
+
+
+def test_screen_asa_range_clears_only_asa_device():
+    item = _item("CVE-2026-6103", [
+        _rng("asa", start_including="9.14", end_excluding="9.16")])
+    rows, candidates, _stats = screen_feed_items(
+        [item], "FW-01, ASA5516-X, 9.18.2\n"
+                "SW-01, Catalyst 9300, 17.9.4\n")
+    assert candidates == []
+    assert len(rows) == 1
+    device_results = rows[0]["triage"]["device_results"]
+    assert device_results[0]["candidate"] is True
+    assert device_results[0]["status"] == "NOT AFFECTED"
+    assert device_results[1]["candidate"] is False
+
+
+def test_unmapped_product_never_local():
+    item = _item("CVE-2026-6104", [
+        _rng("quantum_gateway", vendor="checkpoint",
+             end_excluding="1.0")],
+        text="CVE-2026-6104 advisory.")
+    rows, candidates, stats = screen_feed_items(
+        [item], TWO_DEVICE_TEXT)
+    assert rows == []
+    assert stats["unmapped_products"] >= 1
+
+
+def test_junos_s_release_orders_after_base_r():
+    assert batch._eval_range(
+        "21.2R3-S7",
+        _rng("junos", vendor="juniper",
+             end_excluding="21.2R3")) is False
+    assert batch._eval_range(
+        "21.2R2",
+        _rng("junos", vendor="juniper",
+             end_excluding="21.2R3-S7")) is True
+
+
+def test_eos_letter_tie_stays_uncertain():
+    item = _item("CVE-2026-6105", [
+        _rng("eos", vendor="arista", exact="4.30.5F")])
+    rows, candidates, stats = screen_feed_items(
+        [item], "DC-SW-01, Arista 7050SX3, 4.30.5M\n")
+    assert rows == []
+    assert len(candidates) == 1
+    assert stats["uncertain_candidates"] == 1
+
+
+# ----------------- KEV verdict strength (design 3) ------------------
+
+def _kev_only_pipeline(monkeypatch, kev_entries, nvd_payloads=None,
+                       trace_json=None, lang="en"):
+    judged = _spy_on_run_batch_items(monkeypatch)
+    payloads = nvd_payloads or {
+        "juniper": {"vulnerabilities": []},
+        "cisco": {"vulnerabilities": []}}
+
+    def boom_text(url):
+        raise batch.FetchError("no page text")
+
+    def boom_json(url):
+        raise batch.FetchError("no record")
+
+    rows, stats = run_feed_pipeline(
+        TWO_DEVICE_TEXT, mock=True, lang=lang,
+        nvd_fetcher=_term_fetcher(payloads),
+        kev_fetcher=lambda url: {"vulnerabilities": kev_entries},
+        trace_fetcher=boom_text,
+        trace_json_fetcher=trace_json or boom_json, now=NOW)
+    return rows, stats, judged
+
+
+def test_pipeline_kev_no_range_becomes_kev_unconfirmed_row(
+        monkeypatch):
+    entry = _kev_entry("CVE-2026-6201", "Juniper", "Junos OS",
+                       "2026-09-01", due="2026-12-01")
+    rows, stats, judged = _kev_only_pipeline(monkeypatch, [entry])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["basis"] == "local-screen"
+    assert row["triage"]["verdict"] == "CANNOT DETERMINE"
+    assert row["triage"]["clocked_calls"] == 0
+    assert len(row["triage"]["conditions"]) == 1
+    assert "KEV" in row["triage"]["conditions"][0]
+    assert row["triage"]["extracted"]["action_deadline"] == \
+        "2026-12-01"
+    assert row["sources"] == ["KEV"]
+    assert row["due_date"] == "2026-12-01"
+    assert stats["kev_unconfirmed"] == 1
+    assert stats["deep_triaged"] == 0
+    assert judged == []
+
+
+def test_pipeline_kev_with_traced_ranges_that_hit_still_deep_triaged(
+        monkeypatch):
+    entry = _kev_entry("CVE-2026-6202", "Juniper", "Junos OS",
+                       "2026-09-01", due="2026-12-01")
+    payload = {
+        "cveMetadata": {"cveId": "CVE-2026-6202"},
+        "containers": {"cna": {
+            "affected": [{
+                "vendor": "Juniper Networks", "product": "Junos OS",
+                "versions": [{"version": "21.2",
+                              "lessThan": "21.4R1",
+                              "status": "affected"}]}],
+            "descriptions": [{"lang": "en", "value":
+                              "Junos OS flaw."}],
+        }},
+    }
+
+    def trace_json(url):
+        if url == batch.cvelist_url("CVE-2026-6202"):
+            return payload
+        raise batch.FetchError("no record")
+
+    rows, stats, judged = _kev_only_pipeline(
+        monkeypatch, [entry], trace_json=trace_json)
+    assert judged == ["KEV CVE-2026-6202"]
+    assert stats["kev_unconfirmed"] == 0
+    assert stats["deep_triaged"] == 1
+
+
+def test_pipeline_kev_with_nvd_ranges_cleared_is_not_affected(
+        monkeypatch):
+    vuln = _vuln(
+        "CVE-2026-6203", "2026-08-01T00:00:00.000",
+        "Juniper Junos OS flaw.", score=8.8, severity="HIGH",
+        configurations=_configs(
+            "junos", vendor="juniper",
+            versionStartIncluding="22.0",
+            versionEndExcluding="22.5"))
+    entry = _kev_entry("CVE-2026-6203", "Juniper", "Junos OS",
+                       "2026-09-01", due="2026-12-01")
+    rows, stats, judged = _kev_only_pipeline(
+        monkeypatch, [entry],
+        nvd_payloads={
+            "juniper": {"vulnerabilities": [vuln]},
+            "cisco": {"vulnerabilities": []}})
+    assert judged == []
+    assert stats["kev_unconfirmed"] == 0
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["triage"]["verdict"] == "NOT AFFECTED"
+    assert row["kev"] is True
+    assert row["sources"] == ["NVD", "KEV"]
+
+
+def test_kev_unconfirmed_warnings_overdue_and_ransomware():
+    devices = parse_inventory(TWO_DEVICE_TEXT)
+    overdue = _kev_entry("CVE-2026-6204", "Juniper", "Junos OS",
+                         "2026-09-01", due="2026-01-01")
+    overdue["knownRansomwareCampaignUse"] = "Known"
+    item = batch._kev_item(overdue)
+    evaluation = batch._evaluate_item(item, devices)
+    row = batch._make_local_entry(
+        item, devices, evaluation, "kev_unconfirmed", "en",
+        today=datetime.date(2026, 11, 7))
+    warnings = row["triage"]["warnings"]
+    assert any("has passed" in w for w in warnings)
+    assert any("Known ransomware use" in w for w in warnings)
+    row_ko = batch._make_local_entry(
+        item, devices, evaluation, "kev_unconfirmed", "ko",
+        today=datetime.date(2026, 11, 7))
+    warnings_ko = row_ko["triage"]["warnings"]
+    assert any("지났습니다" in w for w in warnings_ko)
+    assert any("랜섬웨어" in w for w in warnings_ko)
+    calm = _kev_entry("CVE-2026-6205", "Juniper", "Junos OS",
+                      "2026-09-01", due="2027-01-01")
+    item2 = batch._kev_item(calm)
+    row2 = batch._make_local_entry(
+        item2, devices, batch._evaluate_item(item2, devices),
+        "kev_unconfirmed", "en", today=datetime.date(2026, 11, 7))
+    assert row2["triage"]["warnings"] == []
+
+
+# ----------------- merge parity (design 4) --------------------------
+
+def test_year_and_recent_merge_agree():
+    from batch import collect_feed_items
+    vuln = _vuln("CVE-2026-4001", "2026-08-01T00:00:00.000",
+                 "Juniper Junos OS flaw.", score=8.8,
+                 severity="HIGH")
+    catalog = {"vulnerabilities": [
+        _kev_entry("CVE-2026-4001", "Juniper", "Junos OS",
+                   "2026-09-01")]}
+    payloads = {"juniper": {"vulnerabilities": [vuln]},
+                "cisco": {"vulnerabilities": []}}
+    devices = parse_inventory(TWO_DEVICE_TEXT)
+    recent = collect_feed_items(
+        devices, nvd_fetcher=_term_fetcher(payloads),
+        kev_fetcher=lambda url: catalog)
+    year = collect_feed_items_year(
+        devices, nvd_fetcher=_term_fetcher(payloads),
+        kev_fetcher=lambda url: catalog, now=NOW)
+    recent_merged = [i for i in recent["items"]
+                     if i["label"] == "CVE-2026-4001"][0]
+    year_merged = [i for i in year["items"]
+                   if i["label"] == "CVE-2026-4001"][0]
+    for key in ("sources", "kev", "due_date"):
+        assert recent_merged[key] == year_merged[key]
+    assert recent_merged["sources"] == ["NVD", "KEV"]
+
+
+def test_app_summary_table_has_sources_column():
+    cleared = _item("CVE-2026-6301", [
+        _rng("ios_xe", start_including="17.9",
+             end_excluding="17.9.4")])
+    cleared["sources"] = ["NVD", "KEV"]
+    cleared["kev"] = True
+    rows, _c, _s = screen_feed_items([cleared], TWO_DEVICE_TEXT)
+    devices = parse_inventory(TWO_DEVICE_TEXT)
+    kev_entry = batch._make_local_entry(
+        batch._kev_item(_kev_entry(
+            "CVE-2026-6302", "Juniper", "Junos OS", "2026-09-01",
+            due="2026-12-01")),
+        devices,
+        batch._evaluate_item(
+            batch._kev_item(_kev_entry(
+                "CVE-2026-6302", "Juniper", "Junos OS", "2026-09-01",
+                due="2026-12-01")), devices),
+        "kev_unconfirmed", "en", today=datetime.date(2026, 11, 7))
+    rows.append(kev_entry)
+    # An upload-shaped entry (no sources at all) must render "-",
+    # never KeyError.
+    rows.append({"status": "ok", "label": "notes.txt", "url": "",
+                 "triage": {"verdict": "CANNOT DETERMINE",
+                            "urgency": "monitor",
+                            "device_results": [], "conditions": [],
+                            "error": None}})
+    at = AppTest.from_file(APP)
+    at.session_state["batch_results"] = rows
+    at.session_state["batch_source"] = "feeds"
+    at.run()
+    assert not at.exception
+    frame = at.dataframe[0].value
+    assert "Sources" in list(frame.columns)
+    values = [str(v) for v in frame["Sources"]]
+    assert "NVD + KEV" in values
+    assert "KEV" in values
+    assert "-" in values
+    at.selectbox[0].set_value("한국어").run()
+    assert not at.exception
+    frame_ko = at.dataframe[0].value
+    assert "출처" in list(frame_ko.columns)
+    values_ko = [str(v) for v in frame_ko["출처"]]
+    assert "NVD + KEV" in values_ko

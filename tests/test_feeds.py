@@ -7,6 +7,7 @@ the bundled samples, like the rest of the batch suite.
 Run: pytest -q
 """
 
+import datetime
 import sys
 import urllib.parse
 from pathlib import Path
@@ -317,11 +318,20 @@ def test_collect_feed_items_mock_fixtures_offline():
     assert feed["kev"]["status"] == "ok"
     assert feed["nvd"]["count"] == 3
     assert feed["kev"]["count"] == 3
+    # The shared merge (design section 4) makes one item per CVE:
+    # 3 NVD items, two of which merge their KEV twins, plus the
+    # one KEV-only item - 4 items, not 6.
     labels = [item["label"] for item in feed["items"]]
     assert labels == ["CVE-2023-20198", "CVE-2023-36844",
-                      "CVE-2016-6894",
-                      "KEV CVE-2026-7473", "KEV CVE-2023-36844",
-                      "KEV CVE-2023-20198"]
+                      "CVE-2016-6894", "KEV CVE-2026-7473"]
+    assert feed["stats"]["kev_merged"] == 2
+    assert feed["stats"]["kev_only"] == 1
+    merged = feed["items"][0]
+    assert merged["kev"] is True
+    assert merged["sources"] == ["NVD", "KEV"]
+    assert feed["items"][1]["sources"] == ["NVD", "KEV"]
+    assert feed["items"][2]["sources"] == ["NVD"]
+    assert feed["items"][3]["sources"] == ["KEV"]
     # The NVD fixture CVE for Arista carries EOS version prose and
     # the KEV items carry the due date the action block needs.
     arista = feed["items"][2]
@@ -511,12 +521,13 @@ def test_feeds_source_mock_run_yields_summary():
     assert feed_info["screening"]["candidates"] == 4
     assert feed_info["screening"]["local_not_affected"] == 0
     assert feed_info["rescreened_not_affected"] == 0
-    assert feed_info["deep_triaged"] == 4
+    assert feed_info["deep_triaged"] == 3
+    assert feed_info["kev_unconfirmed"] == 1
     captions = [c.value or "" for c in at.caption]
     assert any("Collected last 365 days: NVD 3 · KEV 1" in c
                for c in captions), captions
     assert any("Local screening: 0 not affected by version range"
-               in c and "4 deep-triaged" in c
+               in c and "3 deep-triaged" in c
                for c in captions), captions
     results = at.session_state["batch_results"]
     assert results is not None
@@ -559,3 +570,211 @@ def test_new_sources_render_korean():
     options = at.radio[1].options
     assert any("취약점 피드" in option for option in options), options
     assert any("권고 파일 업로드" in option for option in options), options
+
+
+# ----------------- NVD windows / retry / key (design 1) -------------
+
+_FEEDS_NOW = datetime.datetime(2026, 11, 7, 12, 0, 0,
+                               tzinfo=datetime.timezone.utc)
+
+
+def test_nvd_recent_window_always_present():
+    urls = []
+
+    def stub(url):
+        urls.append(url)
+        return {"vulnerabilities": [], "totalResults": 0}
+
+    collect_nvd_items(_sample_devices(), fetcher=stub, now=_FEEDS_NOW)
+    batch.collect_nvd_items_year(
+        _sample_devices(), fetcher=stub, now=_FEEDS_NOW)
+    assert urls
+    for url in urls:
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(url).query)
+        assert "pubStartDate" in query and "pubEndDate" in query
+        start = datetime.datetime.fromisoformat(
+            query["pubStartDate"][0])
+        end = datetime.datetime.fromisoformat(query["pubEndDate"][0])
+        assert end - start <= datetime.timedelta(days=120)
+        assert end <= _FEEDS_NOW.replace(tzinfo=None) \
+            + datetime.timedelta(days=1)
+    ends = []
+    for url in urls:
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(url).query)
+        ends.append(datetime.datetime.fromisoformat(
+            query["pubEndDate"][0]))
+    # The newest window (and the recent collector) ends at now.
+    assert abs(max(ends) - _FEEDS_NOW.replace(tzinfo=None)) \
+        <= datetime.timedelta(days=1)
+
+
+def test_nvd_retry_on_429_then_success():
+    calls = []
+    sleeps = []
+    vuln = {"cve": {"id": "CVE-2026-1111",
+                    "published": "2026-10-01T00:00:00.000",
+                    "descriptions": [{"lang": "en", "value":
+                                      "Cisco IOS XE flaw."}]}}
+
+    def flaky(url):
+        calls.append(url)
+        if len(calls) == 1:
+            raise FetchError("HTTP 429", status=429, retry_after=7)
+        return {"vulnerabilities": [vuln]}
+
+    result = collect_nvd_items(
+        _sample_devices(), fetcher=flaky, vendor="cisco",
+        sleep=sleeps.append)
+    assert result["status"] == "ok"
+    assert result["count"] == 1
+    assert sleeps == [7.0]
+
+
+def test_nvd_retry_exhausted_is_fetch_failed():
+    calls = []
+    sleeps = []
+
+    def always_429(url):
+        calls.append(url)
+        raise FetchError("HTTP 429", status=429)
+
+    result = collect_nvd_items(
+        _sample_devices(), fetcher=always_429, vendor="cisco",
+        sleep=sleeps.append)
+    assert result["status"] == "fetch_failed"
+    assert len(calls) == 1 + batch.NVD_MAX_RETRIES
+    assert sleeps == [2.0, 5.0]
+
+
+def test_nvd_no_retry_on_500():
+    calls = []
+
+    def fail_500(url):
+        calls.append(url)
+        raise FetchError("HTTP 500", status=500)
+
+    result = collect_nvd_items(
+        _sample_devices(), fetcher=fail_500, vendor="cisco",
+        sleep=lambda seconds: None)
+    assert result["status"] == "fetch_failed"
+    assert len(calls) == 1
+    assert "HTTP 500" in result["reason"]
+
+
+def test_nvd_api_key_sent_as_header_not_url(monkeypatch):
+    monkeypatch.setenv("NVD_API_KEY", "test-only")
+    captured = {}
+
+    def fake_fetch_json(url, timeout=15, headers=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        return {"vulnerabilities": []}
+
+    monkeypatch.setattr(batch, "_fetch_json", fake_fetch_json)
+    fetch = batch._nvd_fetcher(None, has_key=True)
+    fetch("https://services.nvd.nist.gov/rest/json/cves/2.0?x=1")
+    assert captured["headers"] == {"apiKey": "test-only"}
+    assert "test-only" not in captured["url"]
+
+
+# ----------------- KEV structured fields (design 3) -----------------
+
+def test_kev_item_structured_fields():
+    entry = _kev_entry("CVE-2026-1111", "Juniper", "Junos OS",
+                       "2026-09-01", due="2026-10-01")
+    entry["knownRansomwareCampaignUse"] = "Known"
+    entry["requiredAction"] = "Apply fix."
+    item = batch._kev_item(entry)
+    assert item["required_action"] == "Apply fix."
+    assert item["ransomware"] == "Known"
+    assert item["vuln_name"] == "Vuln CVE-2026-1111"
+    assert item["vendor_project"] == "Juniper"
+    assert item["product_name"] == "Junos OS"
+    assert item["due_date"] == "2026-10-01"
+    assert item["sources"] == ["KEV"]
+    # The text stays byte-identical to the long-standing format
+    # (Mock Mode binds canned responses to exact item texts).
+    assert item["text"] == (
+        "KEV CVE-2026-1111 \u2014 Juniper Junos OS\n"
+        "Date added: 2026-09-01\n"
+        "Due date: 2026-10-01\n\n"
+        "Vuln CVE-2026-1111\n"
+        "Required action: Apply fix.\n"
+        "Known ransomware use: Known")
+
+
+def test_deep_triage_kev_text_cannot_be_affected():
+    # The deep-path invariant (K-A) at the matcher level: an
+    # Extract result shaped like a range-less KEV text (product
+    # named, no affected versions, no constraints) can only be
+    # CANNOT DETERMINE with the no_affected_versions reason.
+    from triage import match_device
+    device = {"hostname": "RTR-01", "model": "Juniper Junos OS MX480",
+              "version": "21.3R3"}
+    extracted = {"products": ["Junos OS"], "affected_versions": [],
+                 "version_constraints": [],
+                 "applicability_conditions": []}
+    row = match_device(device, extracted)
+    assert row["status"] == "CANNOT DETERMINE"
+    assert row["reason"] == (
+        "Product matches, but the advisory states no affected "
+        "versions.")
+
+
+# ----------------- shared merge (design 4) --------------------------
+
+def test_merge_feed_items_precedence():
+    rng = {"vendor": "cisco", "product": "ios_xe", "exact": None,
+           "start_including": "17.9", "start_excluding": None,
+           "end_including": None, "end_excluding": "17.9.5"}
+    nvd_item = {"label": "CVE-2026-4001",
+                "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-4001",
+                "text": "CVE-2026-4001 base text.",
+                "published": "2026-08-01", "severity_rank": 3,
+                "kev": False, "sources": ["NVD"],
+                "cpe_ranges": [rng], "references": []}
+    kev_item = batch._kev_item({
+        "cveID": "CVE-2026-4001", "vendorProject": "Cisco",
+        "product": "IOS XE", "dateAdded": "2026-09-01",
+        "dueDate": "2026-12-01", "vulnerabilityName": "XE flaw",
+        "requiredAction": "Apply fix.",
+        "knownRansomwareCampaignUse": "Known"})
+    items, stats = batch.merge_feed_items([nvd_item], [kev_item])
+    assert stats == {"kev_merged": 1, "kev_only": 0}
+    assert len(items) == 1
+    merged = items[0]
+    assert merged["sources"] == ["NVD", "KEV"]
+    assert merged["severity_rank"] == 3
+    assert merged["cpe_ranges"] == [rng]
+    assert merged["label"] == "CVE-2026-4001"
+    assert merged["published"] == "2026-08-01"
+    assert merged["due_date"] == "2026-12-01"
+    assert merged["ransomware"] == "Known"
+    for line in ("CISA KEV: this CVE is in the Known Exploited "
+                 "Vulnerabilities catalog.",
+                 "Date added: 2026-09-01",
+                 "Due date: 2026-12-01",
+                 "Required action: Apply fix.",
+                 "Known ransomware use: Known"):
+        assert line in merged["text"]
+
+
+def test_collect_feed_items_recent_merges_duplicates():
+    vuln = {"cve": {"id": "CVE-2026-4001",
+                    "published": "2026-08-01T00:00:00.000",
+                    "descriptions": [{"lang": "en", "value":
+                                      "Cisco IOS XE flaw."}]}}
+    catalog = {"vulnerabilities": [
+        _kev_entry("CVE-2026-4001", "Cisco", "IOS XE", "2026-09-01")]}
+    feed = collect_feed_items(
+        _sample_devices(),
+        nvd_fetcher=_nvd_fetcher_stub(
+            {"cisco": {"vulnerabilities": [vuln]}}),
+        kev_fetcher=lambda url: catalog)
+    assert feed["stats"]["kev_merged"] == 1
+    matches = [item for item in feed["items"]
+               if item["label"] == "CVE-2026-4001"]
+    assert len(matches) == 1
+    assert matches[0]["sources"] == ["NVD", "KEV"]

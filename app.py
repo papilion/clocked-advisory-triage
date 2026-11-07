@@ -10,6 +10,7 @@ Python 3.9 compatible.
 """
 
 import os
+import re
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -250,6 +251,19 @@ STRINGS = {
         "batch_summary_heading": "Batch summary",
         "col_number": "#",
         "col_advisory": "Advisory",
+        "col_sources": "Sources",
+        "source_badge_nvd": "NVD",
+        "source_badge_kev": "KEV",
+        "source_badge_kev_due": "KEV \u00b7 due %s",
+        "reach_heading": "Source reachability",
+        "reach_ok": "ok",
+        "reach_blocked": "blocked (challenge)",
+        "reach_failed": "failed",
+        "vendor_no_original": (
+            "No vendor structured original is available for this "
+            "vendor; judgement rests on NVD CPE ranges and the "
+            "CVE CNA record."
+        ),
         "col_affected_count": "Affected devices",
         "col_conditions": "Conditions",
         "fetch_failed": "FETCH FAILED",
@@ -268,7 +282,10 @@ STRINGS = {
             "inventory below. A full year of feed history is "
             "collected and screened locally against the vendors' "
             "structured version ranges at zero API cost; only the "
-            "real candidates go to deep triage."
+            "real candidates go to deep triage. NVD collection is "
+            "rate-limited (about 6 seconds between requests "
+            "without an API key, under a second with one): the "
+            "optional NVD_API_KEY speeds up long runs."
         ),
         "feeds_running": "Collecting vulnerability feeds (NVD / KEV)...",
         "feeds_collected": "NVD: %d CVEs collected · KEV: %d matches",
@@ -542,6 +559,18 @@ STRINGS = {
         "batch_summary_heading": "배치 결과 요약",
         "col_number": "#",
         "col_advisory": "권고문",
+        "col_sources": "출처",
+        "source_badge_nvd": "NVD",
+        "source_badge_kev": "KEV",
+        "source_badge_kev_due": "KEV \u00b7 기한 %s",
+        "reach_heading": "소스 도달성",
+        "reach_ok": "정상",
+        "reach_blocked": "차단 (챌린지)",
+        "reach_failed": "실패",
+        "vendor_no_original": (
+            "이 제조사는 구조화된 제조사 원문을 제공하지 않아, "
+            "판정은 NVD CPE 범위와 CVE CNA 레코드를 근거로 합니다."
+        ),
         "col_affected_count": "해당 장비 수",
         "col_conditions": "조건 확인",
         "fetch_failed": "가져오기 실패",
@@ -557,7 +586,10 @@ STRINGS = {
             "카탈로그 — 에서 인벤토리 벤더의 CVE를 수집합니다. 검색어는 "
             "아래 인벤토리에서 자동으로 도출됩니다. 최근 365일 전체를 "
             "수집해 제조사의 구조화 버전 범위로 로컬 스크리닝하므로, "
-            "API 호출은 실제 후보에만 쓰입니다."
+            "API 호출은 실제 후보에만 쓰입니다. NVD 수집은 속도 "
+            "제한이 있습니다(키가 없으면 요청 간 약 6초, 키가 "
+            "있으면 1초 미만): 선택 사항인 NVD_API_KEY를 설정하면 "
+            "긴 수집이 빨라집니다."
         ),
         "feeds_running": "취약점 피드(NVD / KEV)를 수집하는 중...",
         "feeds_collected": "NVD: CVE %d건 수집 · KEV: %d건 일치",
@@ -866,6 +898,78 @@ def _has_key():
         return False
 
 
+def _mirror_nvd_key():
+    # type: () -> None
+    """Mirror the NVD_API_KEY Streamlit secret into the env
+    (the CLOCKED_API_KEY pattern), so batch.py's collectors can
+    read it. A key already in the env wins."""
+    if os.environ.get("NVD_API_KEY"):
+        return
+    try:
+        key = st.secrets.get("NVD_API_KEY")
+    except Exception:
+        return
+    if key:
+        os.environ["NVD_API_KEY"] = str(key)
+
+
+def _entry_sources_label(item, s):
+    # type: (Dict[str, Any], Dict[str, Any]) -> str
+    """The Sources badge for one batch entry: "NVD", "KEV" or
+    "NVD + KEV", composed from the entry's "sources" (falling
+    back to the derived rule - KEV flag, else a CVE-bearing
+    label - when the field is absent, as on upload entries).
+    "" when neither exists."""
+    sources = item.get("sources")
+    if not sources:
+        if item.get("kev"):
+            sources = ["KEV"]
+        elif re.search(r"CVE-\d{4}-\d{4,}",
+                       str(item.get("label") or "")):
+            sources = ["NVD"]
+        else:
+            return ""
+    badges = {"NVD": s["source_badge_nvd"],
+              "KEV": s["source_badge_kev"]}
+    return " + ".join(badges.get(str(source), str(source))
+                      for source in sources)
+
+
+_REACH_SOURCE_NAMES = (
+    ("nvd", "NVD"), ("kev", "KEV"), ("cisco_csaf", "Cisco CSAF"),
+    ("arista_csaf", "Arista CSAF"), ("juniper_jsa", "Juniper JSA"),
+    ("cna", "CNA"))
+
+
+def _reachability_caption(reach, s):
+    # type: (Dict[str, Any], Dict[str, Any]) -> str
+    """One-line reachability summary from a probe result dict,
+    e.g. "Source reachability: NVD ok \u00b7 KEV ok (catalog
+    2026.11.06) \u00b7 Arista CSAF blocked (challenge)". ""
+    when there is nothing to report (Mock Mode / no probe)."""
+    if not reach:
+        return ""
+    parts = []  # type: List[str]
+    for key, name in _REACH_SOURCE_NAMES:
+        info = reach.get(key)
+        if not info:
+            continue
+        status = str(info.get("status") or "")
+        if status == "ok":
+            part = "%s %s" % (name, s["reach_ok"])
+            if key == "kev" and info.get("detail"):
+                part += " (catalog %s)" % info["detail"]
+        elif status == "blocked-challenge":
+            part = "%s %s" % (name, s["reach_blocked"])
+        else:
+            part = "%s %s (%s)" % (name, s["reach_failed"],
+                                   status or "-")
+        parts.append(part)
+    if not parts:
+        return ""
+    return "%s: %s" % (s["reach_heading"], " \u00b7 ".join(parts))
+
+
 def _fmt_prob(prob):
     # type: (Optional[float]) -> str
     if prob is None:
@@ -908,6 +1012,7 @@ def main():
     st.session_state["lang"] = lang
     s = STRINGS[lang]
 
+    _mirror_nvd_key()
     live = _has_key()
     # Demo override (keyed checkbox below the banner): with a key
     # configured it defaults off (Live judging); without a key,
@@ -1368,10 +1473,16 @@ def _render_batch_mode(s, lang, demo_mode=False):
                        % s["vendor_preset_labels"].get(
                            vendor_info.get("vendor"),
                            vendor_info.get("vendor")))
+            if vendor_info.get("vendor") in ("nokia", "extreme"):
+                st.caption(s["vendor_no_original"])
         nvd_info = feed_info.get("nvd") or {}
         kev_info = feed_info.get("kev") or {}
         st.caption(s["feeds_collected_year"] % (
             nvd_info.get("count", 0), kev_info.get("count", 0)))
+        reach_caption = _reachability_caption(
+            feed_info.get("reachability") or {}, s)
+        if reach_caption:
+            st.caption(reach_caption)
         screening = feed_info.get("screening") or {}
         st.caption(s["feeds_screened"] % (
             screening.get("local_not_affected", 0),
@@ -1621,7 +1732,8 @@ def _render_batch_results(results, s, lang, devices=None):
     summary_rows = []  # type: List[Dict[str, Any]]
     for idx, item in enumerate(results, start=1):
         row = {s["col_number"]: idx,
-               s["col_advisory"]: _batch_advisory_label(item, lang)}
+               s["col_advisory"]: _batch_advisory_label(item, lang),
+               s["col_sources"]: _entry_sources_label(item, s) or "-"}
         if item.get("status") == "fetch_failed":
             row[s["verdict_card_label"]] = s["fetch_failed"]
             row[s["urgency_label"]] = "-"
@@ -1720,6 +1832,14 @@ def _render_batch_results(results, s, lang, devices=None):
             title = "%s - %s" % (title, verdict_display)
         with st.expander(title):
             st.caption(str(item.get("url") or item.get("label") or ""))
+            badge = _entry_sources_label(item, s)
+            if badge:
+                if item.get("due_date") and "KEV" in (
+                        item.get("sources") or []):
+                    badge = badge.replace(
+                        s["source_badge_kev"],
+                        s["source_badge_kev_due"] % item["due_date"])
+                st.caption("%s: %s" % (s["source_label"], badge))
             if item.get("source_label"):
                 st.caption(s["vendor_source"] % (
                     item.get("source_label"),
