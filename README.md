@@ -113,6 +113,23 @@ copy-pasting:
      challenge page, or a JavaScript shell with no links in the
      HTML — the app says so plainly and points you at Link list
      mode; it never fakes a result.
+   - **Vendor presets (structured sources)** — inside the same
+     Listing source, preset buttons for **Cisco, Juniper, Arista,
+     Nokia and Extreme Networks** run a vendor listing that never
+     touches the vendor's web listing at all: the run collects
+     that vendor's last 365 days from the structured sources —
+     the NVD CVE API (the vendor's own query) and CISA KEV —
+     traces the candidates to the vendor originals (CSAF / CNA)
+     and screens and judges them exactly like the feeds source
+     below, under a caption that names the vendor and the
+     structured origin. This is the working route for precisely
+     the vendors whose web listings cannot be harvested: Cisco
+     PSIRT and Juniper's listing are JavaScript-rendered, and
+     Arista's sits behind a bot challenge. In Mock Mode the
+     presets run over the bundled fixtures for Cisco, Juniper
+     and Arista; Nokia and Extreme have no bundled demo data,
+     and the app says so plainly instead of showing an empty
+     result — use Live mode for those two.
    - **Link list** — paste advisory URLs, one per line (the
      fallback/advanced option). The app fetches each page itself
      (HTML is reduced to readable text; plain-text advisories pass
@@ -449,6 +466,10 @@ coverage for both input modes.
   JavaScript-rendered portals (measured live: Cisco PSIRT,
   Juniper) report "no links found" — in both cases the UI directs
   you to Link list mode rather than inventing results. The
+  **vendor presets** in the same Listing source are the direct
+  answer for Cisco, Juniper, Arista, Nokia and Extreme: they
+  skip the web listing entirely and collect the vendor from the
+  structured feeds instead. The
   **Vulnerability feeds** and **Upload advisory files** sources
   exist precisely for those portals: NVD/KEV are official
   machine-readable channels, and an upload lets the operator's own

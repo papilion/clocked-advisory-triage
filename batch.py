@@ -755,6 +755,21 @@ def _nvd_query_terms(devices):
     return terms
 
 
+def _vendor_query_term(vendor, devices):
+    # type: (str, List[Dict[str, str]]) -> str
+    """The single NVD keyword query for one explicitly chosen
+    vendor (vendor listing runs): the curated keyword for the core
+    network vendors; any other vendor gets the same derived
+    "<Vendor> <top product token>" form _nvd_query_terms builds,
+    from that vendor's own devices (bare display name when no
+    token stands out)."""
+    if vendor in FEED_VENDOR_KEYWORDS:
+        return FEED_VENDOR_KEYWORDS[vendor]
+    display = VENDOR_DISPLAY_NAMES.get(vendor, vendor)
+    token = _vendor_product_token(devices, vendor)
+    return "%s %s" % (display, token) if token else display
+
+
 def _fetch_json(url, timeout=FETCH_TIMEOUT):
     # type: (str, float) -> Any
     """GET a URL and parse the body as JSON. Raises FetchError."""
@@ -967,8 +982,8 @@ def _nvd_item(vuln, keyword):
             "_published": published_raw}
 
 
-def collect_nvd_items(devices, fetcher=None):
-    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]]) -> Dict[str, Any]
+def collect_nvd_items(devices, fetcher=None, vendor=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[str]) -> Dict[str, Any]
     """Query the NVD CVE API once per vendor present in the
     inventory (_nvd_query_terms: curated keywords for the core
     network vendors, derived "<Vendor> <product>" terms for the
@@ -976,7 +991,10 @@ def collect_nvd_items(devices, fetcher=None):
     into batch items, capped at FEED_ITEM_CAP, deduped by CVE id.
     The cap is shared round-robin across the per-vendor queries
     (newest first within each vendor) so a single vendor's
-    publication batch cannot crowd out the others.
+    publication batch cannot crowd out the others. With `vendor`
+    (a VENDOR_TOKENS key) the run is scoped to that one vendor:
+    its single query term, whether or not the inventory holds
+    devices of that vendor.
 
     Returns {"items", "status", "count", "queries", "reason"} with
     status "ok" | "empty" | "fetch_failed" | "no_vendors" - an
@@ -984,7 +1002,8 @@ def collect_nvd_items(devices, fetcher=None):
     JSON` is injectable for offline tests.
     """
     fetch = fetcher or _fetch_json
-    queries = _nvd_query_terms(devices)
+    queries = ([_vendor_query_term(vendor, devices)] if vendor
+               else _nvd_query_terms(devices))
     result = {"items": [], "status": "empty", "count": 0,
               "queries": queries, "reason": ""}  # type: Dict[str, Any]
     if not queries:
@@ -1099,11 +1118,14 @@ def _parse_iso_date(value):
 
 
 def collect_kev_items(devices, fetcher=None, cap=FEED_ITEM_CAP,
-                      min_date=None):
-    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], int, Optional[datetime.date]) -> Dict[str, Any]
+                      min_date=None, vendor=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], int, Optional[datetime.date], Optional[str]) -> Dict[str, Any]
     """Fetch the CISA KEV catalog once and keep the entries whose
     vendorProject/product mentions an inventory vendor or a
-    significant inventory model token. Returns {"items", "status",
+    significant inventory model token. With `vendor` (a
+    VENDOR_TOKENS key) the match narrows to that one vendor: its
+    name, plus the model tokens of the inventory devices
+    attributed to it. Returns {"items", "status",
     "count", "reason", "older_excluded"} with status "ok" |
     "empty" | "fetch_failed". Matches are newest-first
     (dateAdded) and capped at `cap` (FEED_ITEM_CAP for the
@@ -1127,6 +1149,11 @@ def collect_kev_items(devices, fetcher=None, cap=FEED_ITEM_CAP,
         return result
     vendors = inventory_vendors(devices)
     tokens = set(vendors) | _device_tokens(devices)
+    if vendor:
+        own_devices = [device for device in devices or []
+                       if _device_vendor(device) == vendor]
+        vendors = [vendor]
+        tokens = {vendor} | _device_tokens(own_devices)
     pattern = _relevance_pattern(tokens) if tokens else None
     matched = []  # type: List[Dict[str, Any]]
     for entry in (data or {}).get("vulnerabilities") or []:
@@ -1194,20 +1221,24 @@ def _fixture_kev_fetcher(url):
 
 
 def collect_feed_items(devices, mock=False, nvd_fetcher=None,
-                       kev_fetcher=None):
-    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]]) -> Dict[str, Any]
+                       kev_fetcher=None, vendor=None):
+    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[str]) -> Dict[str, Any]
     """Collect batch items from both feeds. Returns {"items",
     "nvd", "kev"} where "nvd"/"kev" are the per-feed outcome dicts
     from collect_nvd_items / collect_kev_items. With mock=True and
     no injected fetchers, the bundled fixture files are read
-    instead of the network, so the demo path works offline."""
+    instead of the network, so the demo path works offline.
+    `vendor` scopes both feeds to one vendor (see the collectors).
+    """
     if mock:
         if nvd_fetcher is None:
             nvd_fetcher = _fixture_nvd_fetcher
         if kev_fetcher is None:
             kev_fetcher = _fixture_kev_fetcher
-    nvd = collect_nvd_items(devices, fetcher=nvd_fetcher)
-    kev = collect_kev_items(devices, fetcher=kev_fetcher)
+    nvd = collect_nvd_items(devices, fetcher=nvd_fetcher,
+                            vendor=vendor)
+    kev = collect_kev_items(devices, fetcher=kev_fetcher,
+                            vendor=vendor)
     return {"items": list(nvd["items"]) + list(kev["items"]),
             "nvd": nvd, "kev": kev}
 
@@ -1334,12 +1365,13 @@ def _nvd_ts(moment):
 
 
 def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
-                           progress=None, lang="en"):
-    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[Callable[[int, int, str], None]], str) -> Dict[str, Any]
+                           progress=None, lang="en", vendor=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[Callable[[int, int, str], None]], str, Optional[str]) -> Dict[str, Any]
     """Collect a full year of NVD CVEs for the inventory vendors.
 
     Same query derivation as collect_nvd_items (at most
-    NVD_QUERY_CAP vendor queries), but each query walks the last
+    NVD_QUERY_CAP vendor queries; a single term when `vendor`
+    scopes the run to one chosen vendor), but each query walks the last
     NVD_YEAR_DAYS in <=119-day windows and paginates within a
     window (resultsPerPage=NVD_PAGE_SIZE, startIndex) until
     totalResults is exhausted. A per-vendor hard cap of
@@ -1360,7 +1392,8 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
     a static spinner.
     """
     fetch = fetcher or _fetch_json
-    queries = _nvd_query_terms(devices)
+    queries = ([_vendor_query_term(vendor, devices)] if vendor
+               else _nvd_query_terms(devices))
     result = {"items": [], "status": "empty", "count": 0,
               "queries": queries, "reason": "", "windows": 0,
               "truncated": False}  # type: Dict[str, Any]
@@ -1458,8 +1491,8 @@ def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None,
 
 def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
                             kev_fetcher=None, sleep=None, now=None,
-                            progress=None, lang="en"):
-    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[Callable[[int, int, str], None]], str) -> Dict[str, Any]
+                            progress=None, lang="en", vendor=None):
+    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[Callable[[int, int, str], None]], str, Optional[str]) -> Dict[str, Any]
     """Collect a full year from both feeds and merge by CVE id.
 
     NVD items form the base; a KEV entry for the same CVE merges
@@ -1473,7 +1506,9 @@ def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
     Returns {"items", "nvd", "kev", "stats"} where the per-feed
     dicts keep their status/count/reason (and NVD's
     windows/truncated, KEV's older_excluded) and "stats" carries
-    the merge counts. With mock=True and no injected fetchers,
+    the merge counts. With `vendor` (a VENDOR_TOKENS key) both
+    feeds are scoped to that one vendor - the vendor listing runs.
+    With mock=True and no injected fetchers,
     the bundled fixtures answer instead of the network.
     `progress` is forwarded to the NVD collector (one event per
     completed vendor-window) and fires once more when the KEV
@@ -1486,11 +1521,13 @@ def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
     moment = now or datetime.datetime.now(datetime.timezone.utc)
     nvd = collect_nvd_items_year(devices, fetcher=nvd_fetcher,
                                  sleep=sleep, now=moment,
-                                 progress=progress, lang=lang)
+                                 progress=progress, lang=lang,
+                                 vendor=vendor)
     kev_min_date = (moment - datetime.timedelta(
         days=NVD_YEAR_DAYS)).date()
     kev = collect_kev_items(devices, fetcher=kev_fetcher,
-                            cap=KEV_YEAR_CAP, min_date=kev_min_date)
+                            cap=KEV_YEAR_CAP, min_date=kev_min_date,
+                            vendor=vendor)
     total_windows = len(nvd.get("queries") or []) \
         * int(nvd.get("windows") or 0)
     _emit_progress(
@@ -2079,8 +2116,8 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
                       judge_all=False, progress=None, mock=False,
                       nvd_fetcher=None, kev_fetcher=None,
                       trace_fetcher=None, trace_json_fetcher=None,
-                      sleep=None, now=None):
-    # type: (str, Optional[str], str, bool, Optional[Callable[[int, int, str], None]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[str], str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
+                      sleep=None, now=None, vendor=None):
+    # type: (str, Optional[str], str, bool, Optional[Callable[[int, int, str], None]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[str], str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime], Optional[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
     """Run the feeds source end to end.
 
     Collect a full year (collect_feed_items_year) -> screen
@@ -2110,7 +2147,13 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     attempted), "rescreened_not_affected" and the budget actually
     used. stats["credit_exhausted"] reports whether the deep
     triage hit Clocked credit exhaustion (its entries then carry
-    the flag too; the local screening rows are unaffected). In
+    the flag too; the local screening rows are unaffected). With
+    `vendor` (a VENDOR_TOKENS key) the collection is scoped to
+    that one vendor - the vendor listing runs: the same pipeline,
+    fed only that vendor's NVD query and KEV matches, screened
+    and judged against the full inventory as usual; stats then
+    carries "vendor" so the UI can label the run honestly as a
+    structured-source vendor listing. In
     live mode (not mock, no injected fetchers) NVD
     requests are spaced with time.sleep. `progress`, when given,
     reports EVERY stage through the one callback - collection
@@ -2128,7 +2171,7 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     feed = collect_feed_items_year(
         devices, mock=mock, nvd_fetcher=nvd_fetcher,
         kev_fetcher=kev_fetcher, sleep=sleep, now=now,
-        progress=progress, lang=lang)
+        progress=progress, lang=lang, vendor=vendor)
     local_rows, candidates, screen_stats = screen_feed_items(
         feed["items"], inventory_text, lang=lang)
     _emit_progress(
@@ -2192,6 +2235,7 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     rows.sort(key=lambda e: 0 if e.get("kev") else 1)
     screen_stats["local_not_affected"] += rescreened
     stats = {"nvd": feed["nvd"], "kev": feed["kev"],
+             "vendor": vendor,
              "collection": feed["stats"], "screening": screen_stats,
              "traced": trace_stats.get("traced", 0),
              "trace_stats": trace_stats,

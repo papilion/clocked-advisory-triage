@@ -71,6 +71,17 @@ LISTING_PRESETS = [
      "https://github.com/papilion/clocked-advisory-triage/tree/main/samples"),
 ]
 
+# Vendor listing presets inside the Listing source: vendor keys
+# (batch.VENDOR_TOKENS) whose runs collect from structured sources
+# (NVD / CISA KEV + vendor originals) through the feed pipeline
+# instead of scraping the vendor's web listing.
+VENDOR_PRESET_KEYS = ["cisco", "juniper", "arista", "nokia", "extreme"]
+
+# Vendors with no bundled demo fixtures: a Demo-mode vendor run
+# for one of these ends in the designed vendor_demo_unavailable
+# notice instead of an empty result.
+VENDOR_DEMO_UNAVAILABLE = ("nokia", "extreme")
+
 DECIDE_ORDER = ("urgency_immediate", "urgency_planned", "evidence_sufficient")
 
 STRINGS = {
@@ -282,6 +293,42 @@ STRINGS = {
             "JSA / CNA)"
         ),
         "vendor_source": "Vendor source: %s \u2014 %s",
+        "vendor_presets_heading": (
+            "Vendor presets \u2014 structured sources (no web scraping)"
+        ),
+        "vendor_preset_labels": {
+            "cisco": "Cisco",
+            "juniper": "Juniper",
+            "arista": "Arista",
+            "nokia": "Nokia",
+            "extreme": "Extreme Networks",
+        },
+        "vendor_selected": (
+            "Vendor preset: %s \u2014 the batch run collects this "
+            "vendor's advisories from structured sources (the NVD "
+            "CVE API and CISA KEV, traced to the vendor's own "
+            "texts); it does not scrape the vendor's web listing, "
+            "which is JavaScript-rendered or bot-protected. The "
+            "URL field above is ignored while a preset is active."
+        ),
+        "vendor_clear": "Clear vendor preset",
+        "vendor_running": (
+            "Collecting %s advisories from structured sources "
+            "(NVD / KEV)..."
+        ),
+        "vendor_caption": (
+            "Vendor listing \u2014 %s: collected from structured "
+            "sources (NVD / CISA KEV + vendor original texts), "
+            "last 365 days \u2014 not scraped from the vendor's "
+            "web listing page."
+        ),
+        "vendor_demo_unavailable": (
+            "Demo data covers Cisco, Juniper and Arista only "
+            "\u2014 the bundled demo fixtures contain no %s "
+            "advisories, so there is nothing honest to show for "
+            "this vendor offline. Turn Demo mode off (live mode) "
+            "to collect %s from the NVD / KEV feeds."
+        ),
         "uploads_intro": (
             "Upload advisory pages you saved from your own browser - "
             "vendor portals often block automated collection, so your "
@@ -523,6 +570,40 @@ STRINGS = {
             "제조사 원문 추적: %d/%d 후보 (출처: CSAF / JSA / CNA)"
         ),
         "vendor_source": "제조사 원문: %s \u2014 %s",
+        "vendor_presets_heading": (
+            "제조사 프리셋 \u2014 구조화 소스 (웹 스크래핑 아님)"
+        ),
+        "vendor_preset_labels": {
+            "cisco": "Cisco",
+            "juniper": "Juniper",
+            "arista": "Arista",
+            "nokia": "Nokia",
+            "extreme": "Extreme Networks",
+        },
+        "vendor_selected": (
+            "제조사 프리셋: %s \u2014 배치 실행 시 이 제조사의 "
+            "권고를 구조화 소스(NVD CVE API와 CISA KEV, 제조사 "
+            "원문까지 추적)에서 수집합니다. 자바스크립트 "
+            "렌더링이나 봇 차단으로 막힌 제조사 웹 목록 페이지를 "
+            "긁는 방식이 아닙니다. 프리셋이 켜져 있는 동안 위 "
+            "URL 입력란은 무시됩니다."
+        ),
+        "vendor_clear": "제조사 프리셋 해제",
+        "vendor_running": (
+            "구조화 소스(NVD / KEV)에서 %s 권고를 수집하는 중..."
+        ),
+        "vendor_caption": (
+            "제조사 목록 \u2014 %s: 최근 365일치를 구조화 "
+            "소스(NVD / CISA KEV + 제조사 원문)에서 수집했습니다 "
+            "\u2014 제조사 웹 목록 페이지를 긁은 것이 아닙니다."
+        ),
+        "vendor_demo_unavailable": (
+            "데모 데이터는 Cisco\u00b7Juniper\u00b7Arista만 "
+            "다룹니다 \u2014 번들 데모 픽스처에는 %s 권고가 없어 "
+            "오프라인으로 보여드릴 내용이 없습니다. %s 권고는 "
+            "데모 모드를 끈 라이브 모드에서 NVD / KEV 피드로 "
+            "수집해 주세요."
+        ),
         "uploads_intro": (
             "본인 브라우저에서 저장한 권고 페이지를 올리세요 — 벤더 "
             "포털은 자동 수집을 막는 경우가 많아, 수집은 브라우저가 "
@@ -684,12 +765,41 @@ def _on_load_sample_links():
 def _on_set_listing_url(url):
     # type: (str) -> None
     """Preset-button callback: fill the listing URL input and drop
-    any stale harvest outcome."""
+    any stale harvest outcome. Choosing a URL preset also clears
+    a selected vendor preset - the last choice wins."""
     st.session_state["listing_url"] = url
+    st.session_state["listing_vendor"] = None
+    st.session_state["vendor_info"] = None
+    st.session_state["vendor_demo_notice"] = None
     st.session_state["harvest_info"] = None
     st.session_state["batch_results"] = None
     st.session_state["batch_notice_empty"] = False
     st.session_state["batch_notice_listing"] = False
+
+
+def _on_set_listing_vendor(vendor):
+    # type: (str) -> None
+    """Vendor-preset callback: select a structured-source vendor
+    run for the Listing source. The free URL input is cleared as
+    well - while a preset is active the run ignores it, and the
+    UI must not suggest both are in play. Any stale harvest or
+    run outcome is dropped, same as the URL presets do."""
+    st.session_state["listing_vendor"] = vendor
+    st.session_state["listing_url"] = ""
+    st.session_state["harvest_info"] = None
+    st.session_state["batch_results"] = None
+    st.session_state["batch_notice_empty"] = False
+    st.session_state["batch_notice_listing"] = False
+    st.session_state["vendor_info"] = None
+    st.session_state["vendor_demo_notice"] = None
+
+
+def _on_clear_listing_vendor():
+    # type: () -> None
+    """Clear-vendor-preset callback: back to the free URL field."""
+    st.session_state["listing_vendor"] = None
+    st.session_state["vendor_info"] = None
+    st.session_state["vendor_demo_notice"] = None
 
 
 def _has_key():
@@ -767,6 +877,8 @@ def main():
         st.session_state["result"] = None
         st.session_state["batch_results"] = None
         st.session_state["feed_info"] = None
+        st.session_state["vendor_info"] = None
+        st.session_state["vendor_demo_notice"] = None
         st.session_state["batch_error_detail"] = None
 
     st.title(s["title"])
@@ -903,6 +1015,9 @@ def _render_batch_mode(s, lang, demo_mode=False):
     out."""
     st.session_state.setdefault("links_text", "")
     st.session_state.setdefault("listing_url", "")
+    st.session_state.setdefault("listing_vendor", None)
+    st.session_state.setdefault("vendor_info", None)
+    st.session_state.setdefault("vendor_demo_notice", None)
     st.session_state.setdefault("batch_source", "listing")
     st.session_state.setdefault("judge_all", False)
     st.session_state.setdefault("harvest_info", None)
@@ -942,6 +1057,24 @@ def _render_batch_mode(s, lang, demo_mode=False):
             placeholder=s["listing_url_placeholder"],
             key="listing_url",
         )
+        # Vendor presets: a vendor LISTING that never touches the
+        # vendor's web page - the run collects that vendor from
+        # the structured feeds through the feed pipeline (see the
+        # Run handler). Explicit widget keys keep these buttons
+        # distinct from the URL presets above (labels repeat).
+        st.caption(s["vendor_presets_heading"])
+        vendor_cols = st.columns(len(VENDOR_PRESET_KEYS))
+        for col, vendor_key in zip(vendor_cols, VENDOR_PRESET_KEYS):
+            col.button(s["vendor_preset_labels"][vendor_key],
+                       on_click=_on_set_listing_vendor,
+                       args=(vendor_key,),
+                       key="vendor_preset_%s" % vendor_key)
+        listing_vendor = st.session_state.get("listing_vendor")
+        if listing_vendor:
+            st.info(s["vendor_selected"]
+                    % s["vendor_preset_labels"][listing_vendor])
+            st.button(s["vendor_clear"],
+                      on_click=_on_clear_listing_vendor)
     elif source == "links":
         st.button(s["load_sample_links"], on_click=_on_load_sample_links)
         links_text = st.text_area(
@@ -1004,6 +1137,8 @@ def _render_batch_mode(s, lang, demo_mode=False):
         st.session_state["batch_notice_uploads"] = False
         st.session_state["batch_error_detail"] = None
         st.session_state["feed_info"] = None
+        st.session_state["vendor_info"] = None
+        st.session_state["vendor_demo_notice"] = None
 
         def _run_judging(runner):
             # type: (Any) -> None
@@ -1045,7 +1180,35 @@ def _render_batch_mode(s, lang, demo_mode=False):
             # Auto-collect first: harvest the listing page now (not
             # on every rerun) and keep the outcome in session state.
             st.session_state["batch_results"] = None
-            if not (listing_url or "").strip():
+            vendor = st.session_state.get("listing_vendor")
+            if vendor:
+                # Vendor preset run: the feed pipeline scoped to
+                # the one vendor - collection from the structured
+                # sources (NVD / KEV), screening, vendor tracing
+                # and judging exactly as a feeds run, presented
+                # under the vendor caption below. In Demo mode
+                # Nokia / Extreme have no bundled fixture data:
+                # the run ends in the designed notice instead of
+                # an empty table.
+                if demo_mode and vendor in VENDOR_DEMO_UNAVAILABLE:
+                    st.session_state["vendor_demo_notice"] = vendor
+                else:
+                    def _run_vendor(progress, _vendor=vendor):
+                        # type: (Any, str) -> List[Dict[str, Any]]
+                        rows, stats = run_feed_pipeline(
+                            devices_text, lang=lang,
+                            judge_all=judge_all, progress=progress,
+                            mock=demo_mode, vendor=_vendor)
+                        st.session_state["feed_info"] = stats
+                        st.session_state["vendor_info"] = {
+                            "vendor": _vendor}
+                        return rows
+
+                    with st.spinner(
+                            s["vendor_running"]
+                            % s["vendor_preset_labels"][vendor]):
+                        _run_judging(_run_vendor)
+            elif not (listing_url or "").strip():
                 st.session_state["batch_notice_listing"] = True
                 st.session_state["harvest_info"] = None
                 run_urls = []
@@ -1114,8 +1277,25 @@ def _render_batch_mode(s, lang, demo_mode=False):
         st.warning(s["empty_listing"])
     if st.session_state.get("batch_notice_uploads"):
         st.warning(s["empty_uploads"])
+    vendor_demo_notice = st.session_state.get("vendor_demo_notice")
+    if source == "listing" and vendor_demo_notice:
+        notice_label = s["vendor_preset_labels"].get(
+            vendor_demo_notice, vendor_demo_notice)
+        st.warning(s["vendor_demo_unavailable"]
+                   % (notice_label, notice_label))
     feed_info = st.session_state.get("feed_info")
-    if source == "feeds" and feed_info:
+    vendor_info = st.session_state.get("vendor_info")
+    if feed_info and (source == "feeds"
+                      or (source == "listing" and vendor_info)):
+        if vendor_info:
+            # A vendor listing run is a feed pipeline run under a
+            # vendor scope - label it as such (structured sources,
+            # never the vendor's web listing) before the shared
+            # feed counts.
+            st.caption(s["vendor_caption"]
+                       % s["vendor_preset_labels"].get(
+                           vendor_info.get("vendor"),
+                           vendor_info.get("vendor")))
         nvd_info = feed_info.get("nvd") or {}
         kev_info = feed_info.get("kev") or {}
         st.caption(s["feeds_collected_year"] % (
