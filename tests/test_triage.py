@@ -294,13 +294,13 @@ def test_mock_sample5_juniper_affected():
     assert _device_status(result, "AGG-RTR-01") == VERDICT_AFFECTED
 
 
-def test_mock_sample4_detected_by_marker_without_sample_id():
+def test_mock_sample4_detected_by_exact_text_without_sample_id():
     result = _run_sample(None, "sample4_arista_affected.txt")
     assert result["sample_id"] == "sample4"
     assert result["verdict"] == VERDICT_AFFECTED
 
 
-def test_mock_sample5_detected_by_marker_without_sample_id():
+def test_mock_sample5_detected_by_exact_text_without_sample_id():
     result = _run_sample(None, "sample5_juniper_affected.txt")
     assert result["sample_id"] == "sample5"
     assert result["verdict"] == VERDICT_AFFECTED
@@ -316,6 +316,112 @@ def test_mock_arbitrary_text_no_fabricated_verdict():
     assert result["verdict"] is None
     assert "error" in result
     assert "CLOCKED_API_KEY" in result["error"]
+
+
+# --------- mock sample binding: exact text or no canned verdict ------
+# Regression: a canned verdict was served for ANY text whenever a
+# sample_id was passed (a stale UI picker value) or the sample's
+# SYN-* marker appeared in the text. Canned responses are bound to
+# the exact bundled sample texts only.
+
+_SAMPLE_FILES_BY_ID = {
+    "sample1": "sample1_affected.txt",
+    "sample2": "sample2_not_affected.txt",
+    "sample3": "sample3_insufficient.txt",
+    "sample4": "sample4_arista_affected.txt",
+    "sample5": "sample5_juniper_affected.txt",
+    "sample6": "sample6_juniper_prior_to.txt",
+    "sample7": "sample7_arista_conditional.txt",
+}
+
+
+def _load_bundled(filename):
+    root = Path(__file__).resolve().parent.parent
+    return (root / "samples" / filename).read_text(encoding="utf-8")
+
+
+def test_mock_stale_sample_id_no_fabricated_verdict():
+    # Non-sample text after a sample was "loaded" (its id passed
+    # in): the result must be the standing samples-only outcome,
+    # never that sample's canned verdict.
+    result = run_triage(
+        "Completely unrelated advisory about frobnicate routers.",
+        _load_bundled("inventory_sample.txt"),
+        sample_id="sample1",
+        api_key=None,
+    )
+    assert result["verdict"] is None
+    assert "error" in result
+    assert "CLOCKED_API_KEY" in result["error"]
+
+
+def test_mock_edited_sample_text_no_canned_verdict():
+    # One version string edited, the SYN marker intact: neither
+    # the explicit id nor the marker alone may select the canned
+    # responses for the now-different text.
+    advisory = _load_bundled("sample1_affected.txt")
+    edited = advisory.replace("17.9.5", "17.9.99")
+    assert edited != advisory
+    assert "SYN-CSC-2026-1101" in edited
+    for sample_id in ("sample1", None):
+        result = run_triage(
+            edited,
+            _load_bundled("inventory_sample.txt"),
+            sample_id=sample_id,
+            api_key=None,
+        )
+        assert result["verdict"] is None
+        assert "error" in result
+
+
+def test_mock_marker_in_foreign_text_no_canned_verdict():
+    result = run_triage(
+        "SYN-CSC-2026-1101 some other body entirely, no versions.",
+        _load_bundled("inventory_sample.txt"),
+        sample_id=None,
+        api_key=None,
+    )
+    assert result["verdict"] is None
+    assert "error" in result
+
+
+def test_mock_contradictory_sample_id_fails_closed():
+    # The text is exactly sample2 but the caller claims sample1:
+    # a disagreeing id must not serve either canned verdict.
+    result = run_triage(
+        _load_bundled("sample2_not_affected.txt"),
+        _load_bundled("inventory_sample.txt"),
+        sample_id="sample1",
+        api_key=None,
+    )
+    assert result["verdict"] is None
+    assert "error" in result
+
+
+def test_mock_exact_sample_texts_still_canned():
+    # All seven bundled samples keep their canned verdicts, with
+    # an agreeing explicit id and with no id at all.
+    inventory = _load_bundled("inventory_sample.txt")
+    for sample_id, filename in _SAMPLE_FILES_BY_ID.items():
+        advisory = _load_bundled(filename)
+        for passed_id in (sample_id, None):
+            result = run_triage(
+                advisory, inventory,
+                sample_id=passed_id, api_key=None,
+            )
+            assert result["mode"] == "mock"
+            assert result["sample_id"] == sample_id
+            assert result["verdict"] is not None
+
+
+def test_detect_sample_id_requires_exact_text():
+    advisory = _load_bundled("sample1_affected.txt")
+    assert triage.detect_sample_id(advisory) == "sample1"
+    assert triage.detect_sample_id(advisory, "sample1") == "sample1"
+    assert triage.detect_sample_id(advisory, "sample2") is None
+    assert triage.detect_sample_id(advisory + "\nEdited tail.") is None
+    assert triage.detect_sample_id("SYN-CSC-2026-1101 marker only") is None
+    assert triage.detect_sample_id("unrelated text", "sample1") is None
 
 
 # ---------------- real Clocked response shapes (repair round 1) -------
@@ -804,7 +910,7 @@ def test_mock_sample6_prior_to_affected():
     assert result2["verdict"] == VERDICT_NOT_AFFECTED
 
 
-def test_mock_sample6_detected_by_marker_without_sample_id():
+def test_mock_sample6_detected_by_exact_text_without_sample_id():
     result = _run_sample(None, "sample6_juniper_prior_to.txt")
     assert result["sample_id"] == "sample6"
     assert result["verdict"] == VERDICT_AFFECTED
@@ -932,7 +1038,7 @@ def test_mock_sample7_conditional_cannot_determine():
     assert _device_status(result, "DC-SW-02") == VERDICT_NOT_AFFECTED
 
 
-def test_mock_sample7_detected_by_marker_without_sample_id():
+def test_mock_sample7_detected_by_exact_text_without_sample_id():
     result = _run_sample(None, "sample7_arista_conditional.txt")
     assert result["sample_id"] == "sample7"
     assert result["verdict"] == VERDICT_CANNOT

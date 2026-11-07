@@ -216,6 +216,65 @@ def test_feeds_under_override_with_key_uses_fixtures():
     assert all(t["mode"] == "mock" for t in judged)
 
 
+# --------- stale sample binding / stale mode results ---------------
+# Regression: after loading a sample, editing its text in the area
+# still ran with the stored sample_id, and Mock Mode served the
+# untouched sample's canned verdict for the edited text. And a
+# verdict produced under one mode lingered under the other mode's
+# banner after toggling.
+
+
+def test_edited_sample_text_does_not_reuse_canned_verdict():
+    at = _fresh_app()  # no key -> Mock Mode
+    _click_button(at, "Sample 1")
+    assert at.session_state["sample_id"] == "sample1"
+    # Edit one version string; the SYN marker stays in the text.
+    edited = at.text_area[0].value.replace("17.9.5", "17.9.99")
+    assert edited != at.text_area[0].value
+    assert "SYN-CSC-2026-1101" in edited
+    at.text_area[0].set_value(edited).run()
+    assert not at.exception
+
+    _click_button(at, "Run Triage")
+    result = at.session_state["result"]
+    # The standing Mock Mode outcome for arbitrary text - NOT
+    # Sample 1's canned AFFECTED verdict.
+    assert result["verdict"] is None
+    assert "error" in result
+    assert "CLOCKED_API_KEY" in result["error"]
+
+
+def test_mode_toggle_clears_stale_results():
+    at = _fresh_app_with_key()
+    _demo_checkbox(at).set_value(True).run()
+    assert not at.exception
+    # Produce a real paste verdict in Demo mode.
+    at.radio[0].set_value("paste").run()
+    assert not at.exception
+    _click_button(at, "Sample 1")
+    _click_button(at, "Run Triage")
+    assert at.session_state["result"]["verdict"] == "AFFECTED"
+    # Produce real batch results in Demo mode (feeds fixtures).
+    at.radio[0].set_value("batch").run()
+    assert not at.exception
+    at.radio[1].set_value("feeds").run()
+    assert not at.exception
+    _click_button(at, "Run Batch")
+    assert at.session_state["batch_results"] is not None
+    assert at.session_state["feed_info"] is not None
+    # A plain rerun (no mode change) keeps both results.
+    at.run()
+    assert at.session_state["result"] is not None
+    assert at.session_state["batch_results"] is not None
+    # Flipping back to Live must not leave the Demo verdicts
+    # standing under the LIVE banner.
+    _demo_checkbox(at).set_value(False).run()
+    assert not at.exception
+    assert at.session_state["result"] is None
+    assert at.session_state["batch_results"] is None
+    assert at.session_state["feed_info"] is None
+
+
 def test_paste_credit_exhausted_shows_banner_korean():
     # Switch language first: an AppTest widget interaction
     # re-registers the mode radio, so set Paste mode after the

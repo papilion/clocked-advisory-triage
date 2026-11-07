@@ -44,7 +44,8 @@ _SAMPLE_RAW_BASE = (
 
 # Raw URLs of the bundled samples, in sample order - the batch demo
 # fetches exactly these files, so the fetched texts hit the normal
-# sample detection (marker + hash) in Mock and Live mode alike.
+# sample detection (exact-text hash; see triage.detect_sample_id)
+# in Mock and Live mode alike.
 SAMPLE_LINKS = [_SAMPLE_RAW_BASE + SAMPLE_FILES[sid] for sid in SAMPLE_ORDER]
 
 VERDICT_STYLE = {
@@ -636,6 +637,28 @@ def _on_load_sample(sample_id):
     st.session_state["notice_empty"] = False
 
 
+def _gated_sample_id(advisory_text):
+    # type: (str) -> Optional[str]
+    """The session's loaded-sample id, but only while the advisory
+    text is still exactly that sample's bundled text.
+
+    _on_load_sample stores the picker value in session state; the
+    advisory text area stays editable afterwards, so the stored id
+    goes stale the moment the user edits or replaces the text.
+    Passing a stale id on would pin the run to the wrong sample
+    (in Mock Mode, to its canned verdict). Any mismatch clears
+    the id - the run then treats the text as arbitrary text.
+    (triage.detect_sample_id independently revalidates the same
+    way; this gate keeps the UI state honest at the source.)
+    """
+    sample_id = st.session_state.get("sample_id")
+    if sample_id is None or sample_id not in SAMPLE_FILES:
+        return None
+    if (advisory_text or "").strip() != _load_sample(sample_id).strip():
+        return None
+    return sample_id
+
+
 def _on_clear():
     # type: () -> None
     """Clear-button callback: advisory emptied, inventory restored to
@@ -731,6 +754,21 @@ def main():
     st.session_state.setdefault("demo_override", not live)
     demo_mode = bool(st.session_state["demo_override"]) or not live
 
+    # A verdict produced under one effective mode must never
+    # linger under the other mode's banner: when the effective
+    # mode flips (Demo override toggled, or key availability
+    # changed between runs), drop the stored paste result and the
+    # batch run's outputs. The first run only records the mode -
+    # there is nothing stale to clear yet.
+    _prev_demo_mode = st.session_state.setdefault(
+        "_effective_demo_mode", demo_mode)
+    if _prev_demo_mode != demo_mode:
+        st.session_state["_effective_demo_mode"] = demo_mode
+        st.session_state["result"] = None
+        st.session_state["batch_results"] = None
+        st.session_state["feed_info"] = None
+        st.session_state["batch_error_detail"] = None
+
     st.title(s["title"])
     if s["title_subtitle"]:
         st.caption(s["title_subtitle"])
@@ -818,7 +856,7 @@ def _render_paste_mode(s, lang, demo_mode=False):
                         st.session_state["result"] = run_triage(
                             advisory_text,
                             inventory_text,
-                            sample_id=st.session_state.get("sample_id"),
+                            sample_id=_gated_sample_id(advisory_text),
                             lang=lang,
                             mock=demo_mode,
                         )

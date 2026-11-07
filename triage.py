@@ -1404,35 +1404,27 @@ def load_mock_responses():
         return json.load(handle)
 
 
-def detect_sample_id(advisory_text, sample_id=None):
-    # type: (str, Optional[str]) -> Optional[str]
-    if sample_id:
-        return sample_id
+_SAMPLE_FILE_IDS = {
+    "sample1_affected.txt": "sample1",
+    "sample2_not_affected.txt": "sample2",
+    "sample3_insufficient.txt": "sample3",
+    "sample4_arista_affected.txt": "sample4",
+    "sample5_juniper_affected.txt": "sample5",
+    "sample6_juniper_prior_to.txt": "sample6",
+    "sample7_arista_conditional.txt": "sample7",
+}
+
+
+def _exact_sample_match(advisory_text):
+    # type: (str) -> Optional[str]
+    """The bundled sample whose file content the text exactly is,
+    or None. The comparison is a SHA-256 over both sides stripped,
+    so trailing-whitespace differences (e.g. a fetched copy) still
+    count as the same sample, but any content edit does not."""
     text = advisory_text or ""
-    markers = {
-        "SYN-CSC-2026-1101": "sample1",
-        "SYN-JUN-2026-1102": "sample2",
-        "SYN-KISA-2026-1103": "sample3",
-        "SYN-ARS-2026-1104": "sample4",
-        "SYN-JUN-2026-1105": "sample5",
-        "SYN-JUN-2026-1106": "sample6",
-        "SYN-ARS-2026-1107": "sample7",
-    }
-    for marker, sid in markers.items():
-        if marker in text:
-            return sid
     digest = hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
     samples_dir = ROOT / "samples"
-    file_map = {
-        "sample1_affected.txt": "sample1",
-        "sample2_not_affected.txt": "sample2",
-        "sample3_insufficient.txt": "sample3",
-        "sample4_arista_affected.txt": "sample4",
-        "sample5_juniper_affected.txt": "sample5",
-        "sample6_juniper_prior_to.txt": "sample6",
-        "sample7_arista_conditional.txt": "sample7",
-    }
-    for filename, sid in file_map.items():
+    for filename, sid in _SAMPLE_FILE_IDS.items():
         path = samples_dir / filename
         if path.exists():
             sample_digest = hashlib.sha256(
@@ -1441,6 +1433,37 @@ def detect_sample_id(advisory_text, sample_id=None):
             if digest == sample_digest:
                 return sid
     return None
+
+
+def detect_sample_id(advisory_text, sample_id=None):
+    # type: (str, Optional[str]) -> Optional[str]
+    """Identify the bundled sample a text IS, for Mock Mode.
+
+    Strict on purpose: canned Extract/Decide/Verify responses are
+    served ONLY for an exact text match against a bundled sample
+    file (see _exact_sample_match). Two weaker signals are NOT
+    sufficient, because each was observed serving a canned verdict
+    for text it did not describe:
+
+    - a caller-supplied `sample_id` (e.g. a UI picker value left
+      in session state after the user edited or replaced the
+      loaded sample's text) - it is treated as a hint that must
+      AGREE with the exact match; a disagreeing id fails closed
+      and no canned verdict is served at all;
+    - the sample's SYN-* marker appearing in the text - a marker
+      inside otherwise different (e.g. edited) text proves
+      nothing about the rest of the advisory.
+
+    Returns None when the text is not exactly a bundled sample;
+    the Mock Mode caller then produces the standing "samples
+    only / API key needed" outcome instead of a verdict.
+    """
+    matched = _exact_sample_match(advisory_text)
+    if matched is None:
+        return None
+    if sample_id is not None and sample_id != matched:
+        return None
+    return matched
 
 
 # --------------------------------------------------------------------------
