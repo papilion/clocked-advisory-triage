@@ -10,6 +10,7 @@ Python 3.9 compatible.
 """
 
 import os
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +79,9 @@ STRINGS = {
         "inventory_label": "Inventory (one device per line: hostname, model, OS version)",
         "inventory_placeholder": "CORE-SW-01, Catalyst 9300, 17.9.4",
         "run_button": "Run Triage",
+        "empty_advisory": "Paste an advisory first — or click one of the samples above.",
+        "run_failed": "The triage run failed. Please try again.",
+        "error_details": "Error details",
         "spinner": "Running Extract -> match -> Decide -> Verify...",
         "verdict_heading": "Verdict",
         "empty_hint": "Load a sample (or paste an advisory) and click Run Triage.",
@@ -165,6 +169,9 @@ STRINGS = {
         "inventory_label": "인벤토리 (한 줄에 장비 하나: 호스트명, 모델, OS 버전)",
         "inventory_placeholder": "CORE-SW-01, Catalyst 9300, 17.9.4",
         "run_button": "판정 실행",
+        "empty_advisory": "권고문을 먼저 붙여넣어 주세요 — 위 샘플 버튼을 눌러도 됩니다.",
+        "run_failed": "판정 실행에 실패했습니다. 다시 시도해 주세요.",
+        "error_details": "오류 상세",
         "spinner": "Extract -> 매칭 -> Decide -> Verify 실행 중...",
         "verdict_heading": "판정",
         "empty_hint": "샘플을 불러오거나 권고문을 붙여넣은 뒤 '판정 실행'을 클릭하세요.",
@@ -262,6 +269,35 @@ def _load_inventory_sample():
     return path.read_text(encoding="utf-8")
 
 
+def _on_load_sample(sample_id):
+    # type: (str) -> None
+    """Sample-button callback.
+
+    on_click callbacks run BEFORE the script reruns, i.e. before the
+    text_area widgets are created, so writing the widget keys
+    ("advisory_text" / "inventory_text") here is the canonical way to
+    fill key-bound text areas. Assigning them in an `if st.button():`
+    body during the same run is too late - the widget already holds
+    its own state by then.
+    """
+    st.session_state["advisory_text"] = _load_sample(sample_id)
+    st.session_state["inventory_text"] = _load_inventory_sample()
+    st.session_state["sample_id"] = sample_id
+    st.session_state["result"] = None
+    st.session_state["notice_empty"] = False
+
+
+def _on_clear():
+    # type: () -> None
+    """Clear-button callback: advisory emptied, inventory restored to
+    the bundled default. Same on_click pattern as _on_load_sample."""
+    st.session_state["advisory_text"] = ""
+    st.session_state["inventory_text"] = _load_inventory_sample()
+    st.session_state["sample_id"] = None
+    st.session_state["result"] = None
+    st.session_state["notice_empty"] = False
+
+
 def _has_key():
     # type: () -> bool
     if os.environ.get("CLOCKED_API_KEY"):
@@ -325,67 +361,82 @@ def main():
     else:
         st.warning(s["mode_mock"])
 
-    if "advisory_text" not in st.session_state:
-        st.session_state["advisory_text"] = ""
-    if "inventory_text" not in st.session_state:
-        st.session_state["inventory_text"] = _load_inventory_sample()
-    if "sample_id" not in st.session_state:
-        st.session_state["sample_id"] = None
-    if "result" not in st.session_state:
-        st.session_state["result"] = None
+    # Widget state defaults. The two text areas below are keyed
+    # "advisory_text" / "inventory_text", so the widget keys ARE these
+    # session-state keys; setdefault must run before they are created.
+    st.session_state.setdefault("advisory_text", "")
+    st.session_state.setdefault("inventory_text", _load_inventory_sample())
+    st.session_state.setdefault("sample_id", None)
+    st.session_state.setdefault("result", None)
+    st.session_state.setdefault("notice_empty", False)
 
     st.subheader(s["samples_heading"])
     if s["samples_note"]:
         st.caption(s["samples_note"])
     # Eight button slots in two rows of four: seven samples + Clear.
+    # Filling the text areas happens in the on_click callbacks, which
+    # run before the widgets are created on the rerun.
     button_cols = st.columns(4) + st.columns(4)
     for idx, sample_id in enumerate(SAMPLE_ORDER):
         label = s["sample_labels"][sample_id]
-        if button_cols[idx].button(label):
-            st.session_state["advisory_text"] = _load_sample(sample_id)
-            st.session_state["inventory_text"] = _load_inventory_sample()
-            st.session_state["sample_id"] = sample_id
-            st.session_state["result"] = None
-    if button_cols[7].button(s["clear"]):
-        st.session_state["advisory_text"] = ""
-        st.session_state["sample_id"] = None
-        st.session_state["result"] = None
+        button_cols[idx].button(label, on_click=_on_load_sample,
+                                args=(sample_id,))
+    button_cols[7].button(s["clear"], on_click=_on_clear)
 
     left, right = st.columns(2)
 
     with left:
         advisory_text = st.text_area(
             s["advisory_label"], height=320,
-            value=st.session_state["advisory_text"],
             placeholder=s["advisory_placeholder"],
-            key="advisory_input",
+            key="advisory_text",
         )
         inventory_text = st.text_area(
             s["inventory_label"],
             height=180,
-            value=st.session_state["inventory_text"],
             placeholder=s["inventory_placeholder"],
-            key="inventory_input",
+            key="inventory_text",
         )
         run_clicked = st.button(s["run_button"], type="primary")
         if run_clicked:
-            st.session_state["advisory_text"] = advisory_text
-            st.session_state["inventory_text"] = inventory_text
-            with st.spinner(s["spinner"]):
-                st.session_state["result"] = run_triage(
-                    advisory_text,
-                    inventory_text,
-                    sample_id=st.session_state.get("sample_id"),
-                    lang=lang,
-                )
+            if not advisory_text or not advisory_text.strip():
+                # Never call the API with an empty advisory (the SDK
+                # raises a ValidationError on it); show a friendly
+                # localized notice instead.
+                st.session_state["result"] = None
+                st.session_state["notice_empty"] = True
+            else:
+                st.session_state["notice_empty"] = False
+                try:
+                    with st.spinner(s["spinner"]):
+                        st.session_state["result"] = run_triage(
+                            advisory_text,
+                            inventory_text,
+                            sample_id=st.session_state.get("sample_id"),
+                            lang=lang,
+                        )
+                except Exception:
+                    # Show a localized banner, not Streamlit's raw
+                    # traceback; the detail stays in a collapsed
+                    # expander for debugging.
+                    st.session_state["result"] = {
+                        "error": s["run_failed"],
+                        "error_detail": traceback.format_exc(),
+                    }
 
     result = st.session_state.get("result")  # type: Optional[Dict[str, Any]]
     with right:
         st.subheader(s["verdict_heading"])
-        if result is None:
+        if st.session_state.get("notice_empty"):
+            st.warning(s["empty_advisory"])
+        elif result is None:
             st.info(s["empty_hint"])
         elif result.get("error"):
             st.error(str(result.get("error")))
+            error_detail = result.get("error_detail")
+            if error_detail:
+                with st.expander(s["error_details"], expanded=False):
+                    st.code(str(error_detail))
         else:
             _render_result(result, s, lang)
 
