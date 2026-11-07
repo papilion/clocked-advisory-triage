@@ -52,6 +52,11 @@ guessed "not affected".
 - A real inventory CSV also works for the upload shot: Korean or
   English headers, CP949 encoding, and extra columns are all fine —
   the preview caption shows what was understood.
+- Feeds now collect a full year (NVD in ≤119-day windows plus the
+  full KEV catalog), screen it locally against the vendors'
+  structured version ranges at zero API cost, and deep-triage only
+  the real candidates (30 per run, KEV first) — the captions above
+  the results show each stage's counts.
 - Samples 4–5 extend the vendor coverage (Arista EOS hits DC-SW-01,
   Juniper QFX hits AGG-RTR-01), so all three vendors have an
   AFFECTED row in the summary table. Sample 6 shows prose version

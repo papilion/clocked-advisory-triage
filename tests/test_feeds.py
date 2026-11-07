@@ -431,22 +431,47 @@ def test_feeds_source_mock_run_yields_summary():
     _click_button(at, "Run Batch")
     feed_info = at.session_state["feed_info"]
     assert feed_info["nvd"]["count"] == 3
-    assert feed_info["kev"]["count"] == 3
+    # KEV is windowed to the same 365 days as NVD: of the
+    # fixture's 3 KEV matches only the 2026 entry is inside the
+    # window; the two 2023 entries are excluded (and counted), so
+    # nothing merges into the NVD items.
+    assert feed_info["kev"]["count"] == 1
+    assert feed_info["kev"]["older_excluded"] == 2
+    # 3 NVD items + 1 in-window KEV-only item = 4 unique items,
+    # all of which screen in as candidates against the sample
+    # inventory (one Junos exact-version hit, the rest uncertain).
+    # Their traces attach vendor ranges, but both traced items
+    # have fleet devices inside those ranges, so the re-screen
+    # clears none of them.
+    assert feed_info["collection"]["total"] == 4
+    assert feed_info["collection"]["kev_merged"] == 0
+    assert feed_info["collection"]["kev_only"] == 1
+    assert feed_info["collection"]["kev_older_excluded"] == 2
+    assert feed_info["screening"]["candidates"] == 4
+    assert feed_info["screening"]["local_not_affected"] == 0
+    assert feed_info["rescreened_not_affected"] == 0
+    assert feed_info["deep_triaged"] == 4
     captions = [c.value or "" for c in at.caption]
-    assert any("NVD: 3 CVEs collected" in c and "KEV: 3 matches" in c
+    assert any("Collected last 365 days: NVD 3 · KEV 1" in c
+               for c in captions), captions
+    assert any("Local screening: 0 not affected by version range"
+               in c and "4 deep-triaged" in c
                for c in captions), captions
     results = at.session_state["batch_results"]
     assert results is not None
-    assert len(results) == 6
-    # Judging runs KEV-first (known-exploited entries get the
-    # vendor-trace budget first), then the NVD items.
-    assert results[0]["label"] == "KEV CVE-2026-7473"
-    assert results[3]["label"] == "CVE-2023-20198"
-    # Mock Mode tracing resolves the fixture-backed routes: the
-    # Cisco NVD item via its CSAF fixture, both CVE-2023-36844
-    # items via the CNA fixture - shown in the traced caption.
+    assert len(results) == 4
+    # Rows sort KEV first, then newest: the in-window KEV-only
+    # Arista item, then the NVD items newest-first (the two 2023
+    # CVEs are plain NVD items now - their KEV entries fell
+    # outside the 365-day window).
+    assert [r["label"] for r in results] == [
+        "KEV CVE-2026-7473", "CVE-2023-20198", "CVE-2023-36844",
+        "CVE-2016-6894"]
+    # Mock Mode tracing resolves the fixture-backed routes among
+    # the candidates: the Cisco item via its CSAF fixture, the
+    # Juniper item via the CNA fixture - shown in the caption.
     captions = [c.value or "" for c in at.caption]
-    assert any("Vendor-traced: 3 of 6" in c for c in captions), captions
+    assert any("Vendor-traced: 2 of 4" in c for c in captions), captions
 
 
 def test_uploads_source_empty_run_shows_notice():

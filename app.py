@@ -16,9 +16,9 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
-from batch import (HARVEST_CAP, MAX_LINKS, collect_feed_items,
-                   harvest_links, parse_inventory_csv, parse_link_list,
-                   run_batch, run_batch_items, trace_items,
+from batch import (HARVEST_CAP, MAX_LINKS, harvest_links,
+                   parse_inventory_csv, parse_link_list, run_batch,
+                   run_batch_items, run_feed_pipeline,
                    uploaded_files_to_items)
 from triage import parse_inventory, run_triage
 
@@ -116,6 +116,7 @@ STRINGS = {
         "verify_label": "Verify (grounding)",
         "verified": "verified",
         "not_verified": "NOT verified",
+        "local_screen": "local screen (vendor ranges)",
         "mock_result_note": "Demo data: this result used canned Mock Mode responses (sample: %s).",
         "claim_label": "Verdict claim:",
         "per_device_heading": "Per-device results",
@@ -196,6 +197,25 @@ STRINGS = {
         "csv_preview_heading": "Inventory preview (first 10)",
         "csv_no_rows": "No usable device rows were found in that CSV.",
         "csv_parse_failed": "Could not parse that CSV file.",
+        "csv_format_guide": (
+            "**CSV format** - a header row is matched "
+            "case-insensitively, in English or Korean:\n"
+            "- **hostname** (required): `host`, `hostname`, `name`, "
+            "`device`, `device name`, `장비명`, `호스트명`, `호스트`, "
+            "`장비`, `기기명`\n"
+            "- **model** (required): `model`, `모델`, `장비모델`, "
+            "`모델명`, `device model`, `기종`\n"
+            "- **version** (required, the OS/software version): "
+            "`version`, `ver`, `os`, `os version`, `os버전`, `버전`, "
+            "`펌웨어`, `firmware`, `software`, `sw version`\n"
+            "- **vendor** (optional): `vendor`, `벤더`, `제조사`, "
+            "`manufacturer`, `maker`, `브랜드` - prefixed to the "
+            "model when it is not already there.\n"
+            "No recognizable header row? Columns are read "
+            "positionally as host, model, version. Encodings: UTF-8 "
+            "or CP949. Delimiters: comma, semicolon, or tab."
+        ),
+        "csv_sample_download": "Download sample CSV",
         "run_batch_button": "Run Batch",
         "empty_links": (
             "Paste at least one advisory link first - or load the "
@@ -220,10 +240,20 @@ STRINGS = {
             "CISA's Known Exploited Vulnerabilities (KEV) catalog - "
             "instead of scraping vendor portals, which mostly block "
             "automated collection. The queries are derived from the "
-            "inventory below."
+            "inventory below. A full year of feed history is "
+            "collected and screened locally against the vendors' "
+            "structured version ranges at zero API cost; only the "
+            "real candidates go to deep triage."
         ),
         "feeds_running": "Collecting vulnerability feeds (NVD / KEV)...",
         "feeds_collected": "NVD: %d CVEs collected · KEV: %d matches",
+        "feeds_collected_year": (
+            "Collected last 365 days: NVD %d · KEV %d"
+        ),
+        "feeds_screened": (
+            "Local screening: %d not affected by version range · "
+            "%d not in fleet · %d deep-triaged"
+        ),
         "feeds_nvd_empty": "NVD: no CVEs found for the inventory vendors.",
         "feeds_nvd_failed": "NVD: feed could not be fetched (%s)",
         "feeds_nvd_no_vendors": (
@@ -326,6 +356,7 @@ STRINGS = {
         "verify_label": "Verify (grounding)",
         "verified": "검증됨",
         "not_verified": "검증 안 됨",
+        "local_screen": "로컬 스크리닝 (벤더 범위 대조)",
         "mock_result_note": "데모 데이터: 이 결과는 저장된 데모 모드 응답을 사용했습니다 (샘플: %s).",
         "claim_label": "판정 문장 (영문 원문):",
         "per_device_heading": "장비별 판정 결과",
@@ -398,6 +429,25 @@ STRINGS = {
         "csv_preview_heading": "인벤토리 미리보기 (처음 10개)",
         "csv_no_rows": "이 CSV에서 사용할 수 있는 장비 행을 찾지 못했습니다.",
         "csv_parse_failed": "CSV 파일을 해석하지 못했습니다.",
+        "csv_format_guide": (
+            "**CSV 형식** - 헤더 행은 대소문자를 구분하지 않고 영어·"
+            "한국어 모두 인식합니다:\n"
+            "- **hostname** (필수): `host`, `hostname`, `name`, "
+            "`device`, `device name`, `장비명`, `호스트명`, `호스트`, "
+            "`장비`, `기기명`\n"
+            "- **model** (필수): `model`, `모델`, `장비모델`, "
+            "`모델명`, `device model`, `기종`\n"
+            "- **version** (필수, OS/소프트웨어 버전): `version`, "
+            "`ver`, `os`, `os version`, `os버전`, `버전`, `펌웨어`, "
+            "`firmware`, `software`, `sw version`\n"
+            "- **vendor** (선택): `vendor`, `벤더`, `제조사`, "
+            "`manufacturer`, `maker`, `브랜드` - 모델명에 없으면 "
+            "모델 앞에 붙습니다.\n"
+            "인식되는 헤더가 없으면 열을 위치 기준(호스트, 모델, "
+            "버전)으로 읽습니다. 인코딩: UTF-8 또는 CP949. 구분자: "
+            "쉼표, 세미콜론, 탭."
+        ),
+        "csv_sample_download": "샘플 CSV 다운로드",
         "run_batch_button": "배치 실행",
         "empty_links": (
             "권고문 링크를 하나 이상 입력해 주세요 - 샘플 링크 목록을 "
@@ -420,10 +470,17 @@ STRINGS = {
             "벤더 포털은 자동 수집이 차단되는 경우가 많아, 대신 공식 "
             "기계 판독 피드 — NVD CVE API와 CISA 악용 확인 취약점(KEV) "
             "카탈로그 — 에서 인벤토리 벤더의 CVE를 수집합니다. 검색어는 "
-            "아래 인벤토리에서 자동으로 도출됩니다."
+            "아래 인벤토리에서 자동으로 도출됩니다. 최근 365일 전체를 "
+            "수집해 제조사의 구조화 버전 범위로 로컬 스크리닝하므로, "
+            "API 호출은 실제 후보에만 쓰입니다."
         ),
         "feeds_running": "취약점 피드(NVD / KEV)를 수집하는 중...",
         "feeds_collected": "NVD: CVE %d건 수집 · KEV: %d건 일치",
+        "feeds_collected_year": "최근 365일 수집: NVD %d건 · KEV %d건",
+        "feeds_screened": (
+            "로컬 스크리닝: 버전 범위 비해당 %d건 · 인벤토리 무관 "
+            "%d건 · 정밀 판정 %d건"
+        ),
         "feeds_nvd_empty": "NVD: 인벤토리 벤더에 대한 CVE를 찾지 못했습니다.",
         "feeds_nvd_failed": "NVD: 피드를 가져오지 못했습니다 (%s)",
         "feeds_nvd_no_vendors": (
@@ -515,6 +572,15 @@ def _load_inventory_sample():
     # type: () -> str
     path = ROOT / "samples" / "inventory_sample.txt"
     return path.read_text(encoding="utf-8")
+
+
+def _sample_csv_bytes():
+    # type: () -> bytes
+    """Bytes of the bundled sample inventory CSV offered next to
+    the uploader - the same file tests parse, so the download and
+    the documented format can never drift apart."""
+    path = ROOT / "samples" / "sample_inventory.csv"
+    return path.read_bytes()
 
 
 def _on_load_sample(sample_id):
@@ -750,7 +816,6 @@ def _render_batch_mode(s, lang):
     st.session_state.setdefault("batch_notice_listing", False)
     st.session_state.setdefault("batch_notice_uploads", False)
     st.session_state.setdefault("feed_info", None)
-    st.session_state.setdefault("trace_info", None)
     st.session_state.setdefault("batch_error_detail", None)
 
     st.subheader(s["links_heading"])
@@ -803,6 +868,10 @@ def _render_batch_mode(s, lang):
 
     st.subheader(s["csv_heading"])
     uploaded = st.file_uploader(s["csv_label"], type=["csv", "txt", "tsv"])
+    st.markdown(s["csv_format_guide"])
+    st.download_button(
+        s["csv_sample_download"], data=_sample_csv_bytes(),
+        file_name="sample_inventory.csv", mime="text/csv")
     devices_text = ""  # type: str
     if uploaded is not None:
         try:
@@ -840,7 +909,6 @@ def _render_batch_mode(s, lang):
         st.session_state["batch_notice_uploads"] = False
         st.session_state["batch_error_detail"] = None
         st.session_state["feed_info"] = None
-        st.session_state["trace_info"] = None
 
         def _run_judging(runner):
             # type: (Any) -> None
@@ -890,32 +958,27 @@ def _render_batch_mode(s, lang):
                 st.session_state["harvest_info"] = info
                 run_urls = list(info.get("urls") or [])
         elif source == "feeds":
-            # Collect first (queries derive from the inventory);
-            # in Mock Mode the bundled fixtures are read instead of
-            # the network, so the demo path works offline. Then
-            # trace to the vendor originals, KEV items first -
-            # known-exploited entries get the trace budget before
-            # the merely-published NVD ones.
+            # One pipeline (batch.run_feed_pipeline): collect a
+            # full year of feed history, screen it locally against
+            # the vendors' structured version ranges (zero API
+            # calls), trace the surviving candidates to their
+            # vendor originals, and deep-triage only those - KEV
+            # first, within the run's budget. In Mock Mode the
+            # bundled fixtures answer the feed fetches, so the
+            # demo path works offline. The "Judge all" toggle lifts
+            # the deep-triage budget for this source.
             st.session_state["batch_results"] = None
-            try:
-                with st.spinner(s["feeds_running"]):
-                    feed = collect_feed_items(
-                        parse_inventory(devices_text),
-                        mock=not _has_key())
-                    if feed is not None and feed["items"]:
-                        ordered = (list(feed["kev"]["items"])
-                                   + list(feed["nvd"]["items"]))
-                        items, trace_stats = trace_items(
-                            ordered, mock=not _has_key())
-                        st.session_state["trace_info"] = trace_stats
-            except Exception:
-                feed = None
-                st.session_state["batch_error_detail"] = (
-                    traceback.format_exc())
-            if feed is not None:
-                st.session_state["feed_info"] = feed
-                # Zero collected items: the per-feed status lines
-                # below explain the outcome; no batch is run.
+
+            def _run_feeds(progress):
+                # type: (Any) -> List[Dict[str, Any]]
+                rows, stats = run_feed_pipeline(
+                    devices_text, lang=lang, judge_all=judge_all,
+                    progress=progress, mock=not _has_key())
+                st.session_state["feed_info"] = stats
+                return rows
+
+            with st.spinner(s["feeds_running"]):
+                _run_judging(_run_feeds)
         elif source == "uploads":
             st.session_state["batch_results"] = None
             file_pairs = [(f.name, f.getvalue())
@@ -953,15 +1016,17 @@ def _render_batch_mode(s, lang):
     if source == "feeds" and feed_info:
         nvd_info = feed_info.get("nvd") or {}
         kev_info = feed_info.get("kev") or {}
-        st.caption(s["feeds_collected"] % (nvd_info.get("count", 0),
-                                           kev_info.get("count", 0)))
-        trace_results = st.session_state.get("batch_results")
-        if st.session_state.get("trace_info") and trace_results:
-            traced_count = sum(
-                1 for entry in trace_results
-                if entry.get("source_label"))
-            st.caption(s["feeds_traced"] % (traced_count,
-                                            len(trace_results)))
+        st.caption(s["feeds_collected_year"] % (
+            nvd_info.get("count", 0), kev_info.get("count", 0)))
+        screening = feed_info.get("screening") or {}
+        st.caption(s["feeds_screened"] % (
+            screening.get("local_not_affected", 0),
+            screening.get("not_in_fleet", 0),
+            feed_info.get("deep_triaged", 0)))
+        if feed_info.get("traced"):
+            st.caption(s["feeds_traced"] % (
+                feed_info.get("traced", 0),
+                feed_info.get("deep_triaged", 0)))
         if nvd_info.get("status") == "empty":
             st.warning(s["feeds_nvd_empty"])
         elif nvd_info.get("status") == "no_vendors":
@@ -1209,7 +1274,10 @@ def _render_result(result, s, lang):
     else:
         urgency_card = urgency_display
     grounding = result.get("grounding") or {}
-    grounding_status = s["verified"] if grounding.get("supported") else s["not_verified"]
+    if result.get("basis") == "local-screen":
+        grounding_status = s["local_screen"]
+    else:
+        grounding_status = s["verified"] if grounding.get("supported") else s["not_verified"]
 
     st.markdown(
         (

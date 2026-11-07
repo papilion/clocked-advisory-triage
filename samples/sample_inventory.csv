@@ -1,0 +1,7 @@
+hostname,vendor,model,version
+SW-CORE-01,Cisco,Catalyst 9300,17.9.4
+RTR-EDGE-01,Juniper,MX480,21.4R2
+LB-APP-01,F5,BIG-IP 4200,17.1.0
+FW-PERIM-01,Fortinet,FortiGate 100F,7.4.3
+SRV-WIN-01,Microsoft,Windows Server 2022,10.0.20348
+SRV-LNX-01,Red Hat,Rocky Linux 9,9.4

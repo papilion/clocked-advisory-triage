@@ -210,6 +210,51 @@ bundled sample inventory is used so the demo still runs in one
 click. **Paste (single advisory)** mode — the original paste-text
 UI — remains available in the mode switch at the top.
 
+### One year of feed history, screened locally
+
+The feeds source does not judge a year of CVEs one by one — most
+of them are settled by the vendors' own structured data before
+any model call:
+
+1. **Collection (365 days).** NVD is queried per inventory vendor
+   in consecutive publication-date windows of at most **119 days**
+   (the API caps one window at 120 days) and paginated inside
+   each window (500 results per page) until `totalResults` is
+   exhausted — a per-vendor hard cap of 1,000 unique CVEs applies
+   and is reported as truncation when hit. The KEV catalog is
+   matched in full (cap 300, newest first). Entries are deduped
+   by CVE id across windows and feeds — preferring the record
+   that carries NVD `configurations` — and a KEV entry merges
+   into the NVD item of the same CVE (known-exploited flag, due
+   date), so one CVE is one item however many feeds name it.
+2. **Local screening (zero API calls).** Each item's structured
+   CPE ranges are evaluated against every inventoried device's
+   version locally, reusing the same version comparison as the
+   deterministic matcher: a version **inside** an affected range
+   is a candidate-hit; a version **outside every** range for its
+   product clears the device; missing ranges or an unresolvable
+   comparison (e.g. a suffix-letter tie like `17.9.4` vs the
+   bound `17.9.4a`) stay **uncertain**. Items whose related
+   devices are *all* cleared become local **NOT AFFECTED** rows
+   (basis: "local-screen"); items about no inventoried product
+   are screened out and only counted; everything with a hit or an
+   uncertain related device is a candidate.
+3. **Deep triage (budgeted).** Candidates are traced to their
+   vendor originals, then judged by the full Clocked pipeline in
+   priority order — **KEV first, then CVSS severity, then
+   recency** — up to **30 per run** (the "Judge all" toggle lifts
+   the budget to 200). Candidates beyond the budget are not
+   silently dropped: they appear as local **CANNOT DETERMINE**
+   rows stating that screening was inconclusive and the item was
+   beyond this run's deep-triage budget.
+
+The captions over the results report each stage ("Collected last
+365 days: NVD *n* · KEV *k*" and "Local screening: *a* not
+affected by version range · *b* not in fleet · *c*
+deep-triaged"). Local verdicts derive from the vendor-published
+structured ranges — not from the model — and cost no Clocked
+calls at all.
+
 ## How it works
 
 ```

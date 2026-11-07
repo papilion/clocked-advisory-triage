@@ -341,6 +341,101 @@ def test_trace_mock_mode_fixtures():
     assert "source_label" not in by_label["CVE-2016-6894"][0]
 
 
+# ------------------------- traced ranges ----------------------------
+
+def test_trace_cna_attaches_traced_ranges():
+    payload = _cna_payload(
+        "CVE-2023-36844", "Junos OS",
+        [{"version": "0", "lessThan": "20.4R3-S9",
+          "status": "affected"},
+         {"version": "21.2", "lessThan": "21.2R3-S6",
+          "status": "affected"},
+         {"version": "22.1", "status": "unaffected"}],
+        "J-Web vulnerability description.")
+
+    def text_fetch(url):
+        return "too short"
+
+    def json_fetch(url):
+        return payload
+
+    traced, stats = trace_items([_juniper_item()], fetcher=text_fetch,
+                                json_fetcher=json_fetch)
+    ranges = traced[0]["traced_ranges"]
+    # The CNA "0" sentinel means "from the beginning": no lower
+    # bound. A bounded branch keeps both bounds. The unaffected
+    # entry contributes nothing.
+    assert ranges == [
+        {"vendor": "Vendor", "product": "Junos OS", "exact": None,
+         "start_including": None, "start_excluding": None,
+         "end_including": None, "end_excluding": "20.4R3-S9"},
+        {"vendor": "Vendor", "product": "Junos OS", "exact": None,
+         "start_including": "21.2", "start_excluding": None,
+         "end_including": None, "end_excluding": "21.2R3-S6"},
+    ]
+
+
+def test_trace_cna_fixture_ranges_via_mock():
+    traced, stats = trace_items([_juniper_item()], mock=True)
+    assert traced[0]["source_label"] == "CVE CNA record"
+    ranges = traced[0]["traced_ranges"]
+    by_end = {r["end_excluding"]: r for r in ranges
+              if r["end_excluding"]}
+    assert by_end["20.4R3-S9"]["start_including"] is None
+    assert by_end["21.2R3-S6"]["start_including"] == "21.2"
+    # A comma-listed lessThan ("22.4R2-S2, 22.4R3") keeps the
+    # earliest fix bound.
+    assert by_end["22.4R2-S2"]["start_including"] == "22.4"
+    # The branch wildcard (lessThan "21.1*") degrades to a lower
+    # bound only - it can hold a candidate, never clear one.
+    branch = [r for r in ranges if r["start_including"] == "21.1"]
+    assert len(branch) == 1
+    assert branch[0]["end_excluding"] is None
+    assert branch[0]["exact"] is None
+
+
+def test_trace_cisco_csaf_attaches_traced_ranges():
+    item = {"label": "CVE-2023-20198",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-20198",
+            "text": "CVE-2023-20198 \u2014 Cisco IOS XE\n\nFeed body.",
+            "references": [CISCO_PUB_URL]}
+    fixture = _load_fixture("cisco_csaf_fixture.json")
+
+    def text_fetch(url):
+        raise FetchError("no page fetch expected")
+
+    traced, stats = trace_items(
+        [item], fetcher=text_fetch,
+        json_fetcher=lambda url: fixture)
+    ranges = traced[0]["traced_ranges"]
+    # CSAF product_status enumerates affected product versions:
+    # one exact-version range per affected product.
+    assert sorted(r["exact"] for r in ranges) == [
+        "17.6.1", "17.6.5", "17.9.1", "17.9.4"]
+    for rng in ranges:
+        assert rng["vendor"] == "Cisco"
+        # The parsed product token feeds the same product-key
+        # mapping the screening applies to CPE products.
+        assert batch._cpe_product_key(
+            rng["vendor"], rng["product"]) == "cisco ios xe"
+
+
+def test_trace_jsa_text_route_attaches_no_ranges():
+    page = "JSA72300 - J-Web vulnerability. " * 30  # > 400 chars
+
+    def text_fetch(url):
+        return page
+
+    def json_fetch(url):
+        raise AssertionError("CNA must not be fetched when JSA works")
+
+    traced, stats = trace_items([_juniper_item()], fetcher=text_fetch,
+                                json_fetcher=json_fetch)
+    assert traced[0]["source_label"] == "Juniper JSA"
+    # Page text carries no structure to parse into ranges.
+    assert "traced_ranges" not in traced[0]
+
+
 # --------------------- runner passthrough ----------------------------
 
 def test_run_batch_items_source_passthrough():

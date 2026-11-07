@@ -24,6 +24,7 @@ import io
 import json
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,7 +32,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from triage import GENERIC_PRODUCT_WORDS, _product_core, parse_inventory, run_triage
+from triage import (GENERIC_PRODUCT_WORDS, REASON_STRINGS,
+                    VERDICT_AFFECTED, VERDICT_CANNOT,
+                    VERDICT_NOT_AFFECTED, _compare_versions,
+                    _normalize_lang, _product_core, _row, build_claim,
+                    generate_checklist, parse_inventory, product_matches,
+                    run_triage, version_matches)
 
 MAX_LINKS = 10
 HARVEST_CAP = 15
@@ -762,16 +768,21 @@ def _cpe_unescape(field):
     return re.sub(r"\\(.)", r"\1", field or "")
 
 
-def _nvd_cpe_range_lines(vuln, cap=12):
-    # type: (Any, int) -> List[str]
-    """Deterministic affected-range lines from the NVD record's
+def _nvd_cpe_ranges(vuln, cap=40):
+    # type: (Any, int) -> List[Dict[str, Any]]
+    """Machine-readable affected ranges from the NVD record's
     structured configurations: every vulnerable cpeMatch becomes
-    "- product <product>: versions >= X and < Y" (only the bounds
-    present are named; a boundless match falls back to its exact
-    CPE version). Deduped, capped - this is the machine-readable
-    half of the advisory that the prose description often omits."""
-    lines = []  # type: List[str]
-    seen = set()  # type: Set[str]
+    {"vendor", "product", "exact", "start_including",
+    "start_excluding", "end_including", "end_excluding"} with None
+    for absent bounds. A boundless match falls back to its exact
+    CPE version (the update field joins it - Junos CPEs split
+    "21.2R3" into version 21.2 + update r3); a match whose version
+    is a wildcard ("*"/"-") carries no information and is dropped.
+    Deduped, capped. These dicts drive BOTH the human-readable
+    range lines in the item text and the local version-range
+    screening (zero API calls)."""
+    ranges = []  # type: List[Dict[str, Any]]
+    seen = set()  # type: Set[Tuple[Any, ...]]
 
     def walk_node(node):
         # type: (Any) -> bool
@@ -784,29 +795,39 @@ def _nvd_cpe_range_lines(vuln, cap=12):
             product = _cpe_unescape(fields[4])
             if not product:
                 continue
-            bounds = []  # type: List[str]
-            if match.get("versionStartIncluding"):
-                bounds.append(">= %s" % match["versionStartIncluding"])
-            if match.get("versionStartExcluding"):
-                bounds.append("> %s" % match["versionStartExcluding"])
-            if match.get("versionEndIncluding"):
-                bounds.append("<= %s" % match["versionEndIncluding"])
-            if match.get("versionEndExcluding"):
-                bounds.append("< %s" % match["versionEndExcluding"])
-            if bounds:
-                line = "- product %s: versions %s" % (
-                    product, " and ".join(bounds))
-            else:
+            entry = {
+                "vendor": _cpe_unescape(fields[3]),
+                "product": product,
+                "exact": None,
+                "start_including": match.get("versionStartIncluding")
+                or None,
+                "start_excluding": match.get("versionStartExcluding")
+                or None,
+                "end_including": match.get("versionEndIncluding")
+                or None,
+                "end_excluding": match.get("versionEndExcluding")
+                or None,
+            }  # type: Dict[str, Any]
+            if not any(entry[key] for key in (
+                    "start_including", "start_excluding",
+                    "end_including", "end_excluding")):
                 version = _cpe_unescape(fields[5]) if len(fields) > 5 \
                     else ""
                 if version in ("", "*", "-"):
                     continue
-                line = "- product %s: version %s" % (product, version)
-            if line in seen:
+                update = _cpe_unescape(fields[6]) if len(fields) > 6 \
+                    else ""
+                if update and update not in ("*", "-"):
+                    version = version + update
+                entry["exact"] = version
+            key = (entry["vendor"], entry["product"], entry["exact"],
+                   entry["start_including"], entry["start_excluding"],
+                   entry["end_including"], entry["end_excluding"])
+            if key in seen:
                 continue
-            seen.add(line)
-            lines.append(line)
-            if len(lines) >= cap:
+            seen.add(key)
+            ranges.append(entry)
+            if len(ranges) >= cap:
                 return True
         for sub in (node or {}).get("nodes") or []:
             if walk_node(sub):
@@ -816,8 +837,68 @@ def _nvd_cpe_range_lines(vuln, cap=12):
     for wrap in (vuln or {}).get("configurations") or []:
         for node in (wrap or {}).get("nodes") or []:
             if walk_node(node):
-                return lines
-    return lines
+                return ranges
+    return ranges
+
+
+def _range_display(rng):
+    # type: (Dict[str, Any]) -> str
+    """One structured range as a display line (no leading dash):
+    "product ios_xe: versions >= 17.9 and < 17.9.4a", or the
+    exact-version form for a boundless match."""
+    bounds = []  # type: List[str]
+    if rng.get("start_including"):
+        bounds.append(">= %s" % rng["start_including"])
+    if rng.get("start_excluding"):
+        bounds.append("> %s" % rng["start_excluding"])
+    if rng.get("end_including"):
+        bounds.append("<= %s" % rng["end_including"])
+    if rng.get("end_excluding"):
+        bounds.append("< %s" % rng["end_excluding"])
+    if bounds:
+        return "product %s: versions %s" % (
+            rng.get("product") or "", " and ".join(bounds))
+    if rng.get("exact"):
+        return "product %s: version %s" % (
+            rng.get("product") or "", rng["exact"])
+    return "product %s" % (rng.get("product") or "")
+
+
+def _nvd_cpe_range_lines(vuln, cap=12):
+    # type: (Any, int) -> List[str]
+    """Deterministic affected-range lines from the NVD record's
+    structured configurations (see _nvd_cpe_ranges): the
+    machine-readable half of the advisory that the prose
+    description often omits, rendered as text for the item body."""
+    return ["- " + _range_display(rng)
+            for rng in _nvd_cpe_ranges(vuln, cap=cap)]
+
+
+_SEVERITY_RANKS = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1,
+                   "NONE": 0}
+
+
+def _severity_rank(score, severity):
+    # type: (Any, str) -> int
+    """Ordering rank for triage priority: critical 4, high 3,
+    medium 2, low 1, none/unknown 0. The stated severity word
+    wins; the numeric CVSS score is the fallback."""
+    rank = _SEVERITY_RANKS.get(str(severity or "").strip().upper())
+    if rank is not None:
+        return rank
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0
+    if value >= 9.0:
+        return 4
+    if value >= 7.0:
+        return 3
+    if value >= 4.0:
+        return 2
+    if value > 0.0:
+        return 1
+    return 0
 
 
 def _nvd_item(vuln, keyword):
@@ -829,7 +910,11 @@ def _nvd_item(vuln, keyword):
     The item also keeps the record's full reference list (the
     vendor-trace step follows those URLs to the vendor original)
     and a deterministic "Structured affected ranges (NVD CPE)"
-    section parsed from configurations[]."""
+    section parsed from configurations[] - whose structured form
+    also rides on the item as "cpe_ranges" for the local
+    version-range screening, alongside "published" (ISO date),
+    "severity_rank" (CVSS ordering) and "kev" (False until a KEV
+    merge says otherwise)."""
     cve = (vuln or {}).get("cve") or {}
     cve_id = str(cve.get("id") or "").strip()
     if not cve_id:
@@ -873,6 +958,10 @@ def _nvd_item(vuln, keyword):
             "url": "https://nvd.nist.gov/vuln/detail/%s" % cve_id,
             "text": text,
             "references": references,
+            "published": published_raw[:10],
+            "severity_rank": _severity_rank(score, severity),
+            "kev": False,
+            "cpe_ranges": _nvd_cpe_ranges(cve),
             "_published": published_raw}
 
 
@@ -986,19 +1075,48 @@ def _kev_item(entry):
     )
     return {"label": "KEV %s" % cve_id,
             "url": "https://nvd.nist.gov/vuln/detail/%s" % cve_id,
-            "text": text}
+            "text": text,
+            "published": str(entry.get("dateAdded") or ""),
+            "date_added": str(entry.get("dateAdded") or ""),
+            "due_date": str(entry.get("dueDate") or ""),
+            "severity_rank": 4,
+            "kev": True,
+            "cpe_ranges": []}
 
 
-def collect_kev_items(devices, fetcher=None):
-    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]]) -> Dict[str, Any]
+def _parse_iso_date(value):
+    # type: (Any) -> Optional[datetime.date]
+    """Parse the leading YYYY-MM-DD of an ISO date/datetime
+    string, or None when it does not parse (callers treat an
+    unparseable date as undated, never as excludable evidence)."""
+    text = str(value or "").strip()[:10]
+    try:
+        return datetime.date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def collect_kev_items(devices, fetcher=None, cap=FEED_ITEM_CAP,
+                      min_date=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], int, Optional[datetime.date]) -> Dict[str, Any]
     """Fetch the CISA KEV catalog once and keep the entries whose
     vendorProject/product mentions an inventory vendor or a
     significant inventory model token. Returns {"items", "status",
-    "count", "reason"} with status "ok" | "empty" |
-    "fetch_failed". `fetcher(url) -> parsed JSON` is injectable."""
+    "count", "reason", "older_excluded"} with status "ok" |
+    "empty" | "fetch_failed". Matches are newest-first
+    (dateAdded) and capped at `cap` (FEED_ITEM_CAP for the
+    recent-items collector; the year pipeline passes
+    KEV_YEAR_CAP). When `min_date` (a datetime.date) is given,
+    matches whose dateAdded falls before it are excluded BEFORE
+    the cap applies and counted in "older_excluded" - the year
+    pipeline passes the start of its 365-day window so KEV covers
+    the same lookback as NVD instead of the catalog's whole
+    history. Entries with an unparseable dateAdded are kept: an
+    undated entry is not evidence of age. `fetcher(url) ->
+    parsed JSON` is injectable."""
     fetch = fetcher or _fetch_json
     result = {"items": [], "status": "empty", "count": 0,
-              "reason": ""}  # type: Dict[str, Any]
+              "reason": "", "older_excluded": 0}  # type: Dict[str, Any]
     try:
         data = fetch(KEV_FEED_URL)
     except Exception as exc:
@@ -1016,12 +1134,20 @@ def collect_kev_items(devices, fetcher=None):
                             entry.get("product") or "")
         lowered = fields.lower()
         if any(vendor in lowered for vendor in vendors):
-            matched.append(entry)
+            pass
         elif pattern is not None and pattern.search(fields):
-            matched.append(entry)
+            pass
+        else:
+            continue
+        if min_date is not None:
+            added = _parse_iso_date(entry.get("dateAdded"))
+            if added is not None and added < min_date:
+                result["older_excluded"] += 1
+                continue
+        matched.append(entry)
     matched.sort(key=lambda e: str(e.get("dateAdded") or ""),
                  reverse=True)
-    items = [_kev_item(entry) for entry in matched[:FEED_ITEM_CAP]]
+    items = [_kev_item(entry) for entry in matched[:cap]]
     result["items"] = items
     result["count"] = len(items)
     if items:
@@ -1082,6 +1208,870 @@ def collect_feed_items(devices, mock=False, nvd_fetcher=None,
     kev = collect_kev_items(devices, fetcher=kev_fetcher)
     return {"items": list(nvd["items"]) + list(kev["items"]),
             "nvd": nvd, "kev": kev}
+
+
+# ---------------------------------------------------------------------------
+# Full-year feed collection
+#
+# The recent-items collector above answers "what is new this
+# quarter". Operations needs the whole lookback: collect_feed_
+# items_year gathers a full 365 days - NVD queried in consecutive
+# publication-date windows of at most 119 days (the API caps one
+# window at 120 days), paginated inside each window, and the KEV
+# catalog matched within the same 365-day window (older matches
+# are excluded and counted, never merged). KEV entries merge into
+# the NVD item of the same CVE (known-exploited flag + due date),
+# so one CVE is one item however many feeds name it. The result
+# is deliberately
+# NOT judged item by item - screen_feed_items below settles most
+# of it locally, and run_feed_pipeline spends Clocked calls only
+# on the real candidates.
+# ---------------------------------------------------------------------------
+
+NVD_YEAR_DAYS = 365
+NVD_WINDOW_DAYS = 119
+NVD_PAGE_SIZE = 500
+NVD_VENDOR_YEAR_CAP = 1000
+KEV_YEAR_CAP = 300
+FEED_SLEEP_SECONDS = 0.7
+FULL_TRIAGE_CAP = 30
+JUDGE_ALL_CAP = 200
+# Candidates traced for the post-trace re-screen in one pipeline
+# run - deliberately larger than FULL_TRIAGE_CAP: a trace is a
+# plain HTTP fetch, and every candidate it clears locally frees
+# a deep-triage slot for the next one.
+TRACE_SCREEN_CAP = 80
+
+
+def _nvd_windows(now, days=NVD_YEAR_DAYS):
+    # type: (datetime.datetime, int) -> List[Tuple[datetime.datetime, datetime.datetime]]
+    """Consecutive [start, end] publication windows covering the
+    last `days` days, each at most NVD_WINDOW_DAYS long, oldest
+    first."""
+    end = now
+    start = now - datetime.timedelta(days=days)
+    windows = []  # type: List[Tuple[datetime.datetime, datetime.datetime]]
+    cursor = start
+    while cursor < end:
+        window_end = min(
+            cursor + datetime.timedelta(days=NVD_WINDOW_DAYS), end)
+        windows.append((cursor, window_end))
+        cursor = window_end
+    return windows
+
+
+def _nvd_ts(moment):
+    # type: (datetime.datetime) -> str
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.000")
+
+
+def collect_nvd_items_year(devices, fetcher=None, sleep=None, now=None):
+    # type: (List[Dict[str, str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Dict[str, Any]
+    """Collect a full year of NVD CVEs for the inventory vendors.
+
+    Same query derivation as collect_nvd_items (at most
+    NVD_QUERY_CAP vendor queries), but each query walks the last
+    NVD_YEAR_DAYS in <=119-day windows and paginates within a
+    window (resultsPerPage=NVD_PAGE_SIZE, startIndex) until
+    totalResults is exhausted. A per-vendor hard cap of
+    NVD_VENDOR_YEAR_CAP unique CVEs applies; hitting it (or a
+    window whose total could not be fully read) sets "truncated".
+    Records are deduped by CVE id across windows and vendors,
+    preferring the record that carries configurations (the
+    structured ranges the screening lives on). `sleep(seconds)`,
+    when given, is called before every HTTP request after the
+    first - the live pipeline passes time.sleep; tests pass None.
+    Returns collect_nvd_items' keys plus {"windows", "truncated"}.
+    """
+    fetch = fetcher or _fetch_json
+    queries = _nvd_query_terms(devices)
+    result = {"items": [], "status": "empty", "count": 0,
+              "queries": queries, "reason": "", "windows": 0,
+              "truncated": False}  # type: Dict[str, Any]
+    if not queries:
+        result["status"] = "no_vendors"
+        return result
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    windows = _nvd_windows(moment)
+    result["windows"] = len(windows)
+    by_id = {}  # type: Dict[str, Tuple[Any, str]]
+    errors = []  # type: List[str]
+    requests_made = [0]
+
+    def fetch_page(url):
+        # type: (str) -> Any
+        if sleep is not None and requests_made[0] > 0:
+            try:
+                sleep(FEED_SLEEP_SECONDS)
+            except Exception:
+                pass
+        requests_made[0] += 1
+        return fetch(url)
+
+    for term in queries:
+        vendor_count = 0
+        for window_start, window_end in windows:
+            start_index = 0
+            while True:
+                if vendor_count >= NVD_VENDOR_YEAR_CAP:
+                    result["truncated"] = True
+                    break
+                url = NVD_API_URL + "?" + urllib.parse.urlencode(
+                    {"keywordSearch": term,
+                     "resultsPerPage": NVD_PAGE_SIZE,
+                     "startIndex": start_index,
+                     "pubStartDate": _nvd_ts(window_start),
+                     "pubEndDate": _nvd_ts(window_end)})
+                try:
+                    data = fetch_page(url)
+                except Exception as exc:
+                    errors.append(str(exc) or exc.__class__.__name__)
+                    break
+                vulns = (data or {}).get("vulnerabilities") or []
+                total = (data or {}).get("totalResults")
+                new_ids = 0
+                for vuln in vulns:
+                    cve = (vuln or {}).get("cve") or {}
+                    cve_id = str(cve.get("id") or "").strip()
+                    if not cve_id:
+                        continue
+                    if cve_id in by_id:
+                        kept = (by_id[cve_id][0] or {}).get("cve") or {}
+                        if not kept.get("configurations") \
+                                and cve.get("configurations"):
+                            by_id[cve_id] = (vuln, term)
+                        continue
+                    by_id[cve_id] = (vuln, term)
+                    vendor_count += 1
+                    new_ids += 1
+                fetched = start_index + len(vulns)
+                if not vulns:
+                    break
+                if total is not None:
+                    if fetched >= int(total):
+                        break
+                elif len(vulns) < NVD_PAGE_SIZE or new_ids == 0:
+                    break
+                start_index = fetched
+    items = []  # type: List[Dict[str, Any]]
+    for vuln, term in by_id.values():
+        item = _nvd_item(vuln, term)
+        if item is not None:
+            item.pop("_published", None)
+            items.append(item)
+    items.sort(key=lambda it: str(it.get("published") or ""),
+               reverse=True)
+    result["items"] = items
+    result["count"] = len(items)
+    if items:
+        result["status"] = "ok"
+    elif errors and requests_made[0] > 0 \
+            and len(errors) >= len(queries) * len(windows):
+        result["status"] = "fetch_failed"
+        result["reason"] = errors[0]
+    elif errors:
+        result["reason"] = errors[0]
+    return result
+
+
+def collect_feed_items_year(devices, mock=False, nvd_fetcher=None,
+                            kev_fetcher=None, sleep=None, now=None):
+    # type: (List[Dict[str, str]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Dict[str, Any]
+    """Collect a full year from both feeds and merge by CVE id.
+
+    NVD items form the base; a KEV entry for the same CVE merges
+    into its NVD item (kev=True, due date kept, and the KEV facts
+    appended to the item text where the Extract pass and the
+    Action block can use them); KEV-only entries are included as
+    their own items. Both feeds cover the SAME 365-day lookback:
+    KEV matches whose dateAdded predates the window are excluded
+    before merging (so an old KEV entry never flags an NVD item
+    either) and counted in stats as "kev_older_excluded".
+    Returns {"items", "nvd", "kev", "stats"} where the per-feed
+    dicts keep their status/count/reason (and NVD's
+    windows/truncated, KEV's older_excluded) and "stats" carries
+    the merge counts. With mock=True and no injected fetchers,
+    the bundled fixtures answer instead of the network."""
+    if mock:
+        if nvd_fetcher is None:
+            nvd_fetcher = _fixture_nvd_fetcher
+        if kev_fetcher is None:
+            kev_fetcher = _fixture_kev_fetcher
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    nvd = collect_nvd_items_year(devices, fetcher=nvd_fetcher,
+                                 sleep=sleep, now=moment)
+    kev_min_date = (moment - datetime.timedelta(
+        days=NVD_YEAR_DAYS)).date()
+    kev = collect_kev_items(devices, fetcher=kev_fetcher,
+                            cap=KEV_YEAR_CAP, min_date=kev_min_date)
+    items = []  # type: List[Dict[str, Any]]
+    by_cve = {}  # type: Dict[str, Dict[str, Any]]
+    for item in nvd["items"]:
+        items.append(item)
+        cve_id = _item_cve_id(item)
+        if cve_id:
+            by_cve[cve_id] = item
+    kev_merged = 0
+    kev_only = 0
+    for kev_item in kev["items"]:
+        cve_id = _item_cve_id(kev_item)
+        target = by_cve.get(cve_id) if cve_id else None
+        if target is None:
+            items.append(kev_item)
+            kev_only += 1
+            continue
+        target["kev"] = True
+        target["due_date"] = kev_item.get("due_date") or ""
+        target["date_added"] = kev_item.get("date_added") or ""
+        target["text"] = (
+            str(target.get("text") or "")
+            + "\n\nCISA KEV: this CVE is in the Known Exploited "
+              "Vulnerabilities catalog.\nDate added: %s\nDue date: %s"
+            % (kev_item.get("date_added") or "",
+               kev_item.get("due_date") or ""))
+        kev_merged += 1
+    nvd_info = {key: value for key, value in nvd.items()
+                if key != "items"}
+    kev_info = {key: value for key, value in kev.items()
+                if key != "items"}
+    stats = {"nvd_count": nvd["count"], "kev_count": kev["count"],
+             "kev_merged": kev_merged, "kev_only": kev_only,
+             "kev_older_excluded": kev.get("older_excluded", 0),
+             "total": len(items), "windows": nvd.get("windows", 0),
+             "truncated": bool(nvd.get("truncated"))}
+    return {"items": items, "nvd": nvd_info, "kev": kev_info,
+            "stats": stats}
+
+
+# ---------------------------------------------------------------------------
+# Local version-range screening (zero API calls)
+#
+# A year of feeds is hundreds of CVEs; judging every one with the
+# full Clocked pipeline would be slow and wasteful when the
+# vendor's own structured ranges already settle most of them.
+# screen_feed_items evaluates each collected item's CPE ranges
+# (item["cpe_ranges"], plus any item["traced_ranges"] a vendor
+# trace attached - see _evaluate_item) against the inventory
+# LOCALLY, reusing triage's device parsing and version
+# comparison:
+#   - a device version inside an affected range -> candidate-hit
+#   - ranges exist and the version is outside all of them ->
+#     the device is cleared
+#   - no ranges, or a comparison that cannot be made (e.g. a
+#     suffix-letter tie) -> uncertain
+# An item with a hit or an uncertain related device goes to deep
+# triage; an item whose related devices are ALL cleared becomes a
+# local NOT AFFECTED row (basis "local-screen"); an item about no
+# inventoried product is screened out entirely (counted, not
+# shown). Local verdicts come from the vendor-published ranges,
+# never from a model.
+# ---------------------------------------------------------------------------
+
+LOCAL_SCREEN_LABEL = "Local version-range screen"
+
+_PRODUCT_KEY_DISPLAY = {
+    "cisco ios xe": "Cisco IOS XE",
+    "cisco ios": "Cisco IOS",
+    "cisco nx-os": "Cisco NX-OS",
+    "juniper junos": "Juniper Junos OS",
+    "arista eos": "Arista EOS",
+    "f5 big-ip": "F5 BIG-IP",
+    "palo alto pan-os": "Palo Alto PAN-OS",
+    "fortinet fortios": "Fortinet FortiOS",
+    "microsoft windows": "Microsoft Windows",
+    "vmware esxi": "VMware ESXi",
+}
+
+# Text phrases that identify a product family when an item carries
+# no structured ranges (KEV entries, range-less NVD records).
+# Ordered: specific phrases before their prefixes ("ios xe"
+# before the bare "eos" catch is irrelevant, but "windows server"
+# precedes "windows" for display fidelity only - both map alike).
+_TEXT_PRODUCT_PHRASES = [
+    ("ios xe", "cisco ios xe"), ("ios-xe", "cisco ios xe"),
+    ("nx-os", "cisco nx-os"), ("nx os", "cisco nx-os"),
+    ("junos", "juniper junos"),
+    ("big-ip", "f5 big-ip"), ("bigip", "f5 big-ip"),
+    ("pan-os", "palo alto pan-os"),
+    ("fortios", "fortinet fortios"),
+    ("windows server", "microsoft windows"),
+    ("windows", "microsoft windows"),
+    ("esxi", "vmware esxi"), ("vsphere", "vmware esxi"),
+    ("eos", "arista eos"),
+]
+
+_CPE_VENDOR_KEYS = [
+    ("juniper", "juniper"), ("cisco", "cisco"), ("arista", "arista"),
+    ("palo", "paloalto"), ("fortinet", "fortinet"),
+    ("microsoft", "microsoft"), ("vmware", "vmware"),
+    ("nokia", "nokia"), ("extreme", "extreme"),
+    ("citrix", "citrix"), ("broadcom", "broadcom"),
+    ("check_point", "checkpoint"), ("checkpoint", "checkpoint"),
+    ("netscout", "arbor"), ("arbor", "arbor"),
+    ("supermicro", "supermicro"), ("lenovo", "lenovo"),
+    ("dell", "dell"), ("f5", "f5"), ("a10", "a10"),
+    ("hp", "hpe"), ("ahnlab", "ahnlab"), ("piolink", "piolink"),
+]
+
+
+def _cpe_product_key(vendor, product):
+    # type: (Any, Any) -> Optional[str]
+    """Normalize a CPE vendor/product pair to a fleet product key
+    ("juniper junos", "cisco ios xe", ...), or None when the
+    product is outside the explicit map - the caller then falls
+    back to token overlap via triage.product_matches."""
+    p = str(product or "").lower().replace("_", "-")
+    v = str(vendor or "").lower()
+    if "junos" in p:
+        return "juniper junos"
+    if "ios-xe" in p:
+        return "cisco ios xe"
+    if "nx-os" in p:
+        return "cisco nx-os"
+    if p == "ios" and "cisco" in v:
+        return "cisco ios"
+    if p == "eos" and ("arista" in v or not v):
+        return "arista eos"
+    if p.startswith("big-ip"):
+        return "f5 big-ip"
+    if "pan-os" in p:
+        return "palo alto pan-os"
+    if "fortios" in p:
+        return "fortinet fortios"
+    if p.startswith("windows"):
+        return "microsoft windows"
+    if "esxi" in p or p == "vsphere":
+        return "vmware esxi"
+    return None
+
+
+def _cpe_vendor_key(vendor):
+    # type: (Any) -> Optional[str]
+    """Map a CPE vendor string ("paloaltonetworks", "f5") to a
+    VENDOR_TOKENS key, or None."""
+    v = str(vendor or "").lower()
+    for needle, key in _CPE_VENDOR_KEYS:
+        if needle in v:
+            return key
+    return None
+
+
+def _device_product_keys(device):
+    # type: (Dict[str, str]) -> Set[str]
+    """Product keys a device plausibly runs, from its model text
+    and detected vendor. Hardware families imply their OS
+    (Catalyst/ASR/ISR run IOS XE, Nexus runs NX-OS, every Juniper
+    box runs Junos, every Arista box runs EOS); an unrecognized
+    Cisco model keeps both Cisco OS keys so a range check clears
+    it only when BOTH families' ranges exclude its version -
+    a false candidate is cheaper than a false clear."""
+    model = str((device or {}).get("model") or "")
+    lowered = model.lower()
+    vendor = _device_vendor(device)
+    keys = set()  # type: Set[str]
+    if vendor == "juniper" or "junos" in lowered:
+        keys.add("juniper junos")
+    if vendor == "arista" or re.search(r"\beos\b", lowered):
+        keys.add("arista eos")
+    if "nexus" in lowered or "nx-os" in lowered:
+        keys.add("cisco nx-os")
+    if "ios xe" in lowered or "ios-xe" in lowered:
+        keys.add("cisco ios xe")
+    if vendor == "cisco":
+        if any(word in lowered for word in
+               ("catalyst", "asr", "isr", "csr")):
+            keys.add("cisco ios xe")
+        if not keys:
+            keys.update(("cisco ios", "cisco ios xe"))
+    if "big-ip" in lowered or "bigip" in lowered:
+        keys.add("f5 big-ip")
+    if vendor == "paloalto" or "pan-os" in lowered:
+        keys.add("palo alto pan-os")
+    if "forti" in lowered:
+        keys.add("fortinet fortios")
+    if "windows" in lowered:
+        keys.add("microsoft windows")
+    if "esxi" in lowered or "vsphere" in lowered:
+        keys.add("vmware esxi")
+    return keys
+
+
+def _eval_range(device_version, rng):
+    # type: (str, Dict[str, Any]) -> Optional[bool]
+    """Evaluate one structured range against a device version:
+    True inside, False outside, None when the comparison cannot
+    be made (unparseable version, or a numeric tie with differing
+    letter suffixes - triage._compare_versions refuses to guess
+    those, and so does the screen)."""
+    if rng.get("exact"):
+        return version_matches(device_version, str(rng["exact"]))
+    checks = []  # type: List[Optional[bool]]
+    bounds = (
+        ("start_including", lambda c: c >= 0),
+        ("start_excluding", lambda c: c > 0),
+        ("end_including", lambda c: c <= 0),
+        ("end_excluding", lambda c: c < 0),
+    )
+    for field, predicate in bounds:
+        bound = rng.get(field)
+        if bound:
+            compared = _compare_versions(device_version, str(bound))
+            checks.append(None if compared is None
+                          else bool(predicate(compared)))
+    if not checks:
+        return None
+    if any(check is False for check in checks):
+        return False
+    if any(check is None for check in checks):
+        return None
+    return True
+
+
+def _screen_item(item, devices, device_keys_list):
+    # type: (Dict[str, Any], List[Dict[str, str]], List[Set[str]]) -> Dict[str, Any]
+    """Screen one collected item against the inventory devices.
+
+    Returns {"outcome", "evals", "has_hit", "displays",
+    "range_lines"} where "evals" aligns with `devices` and holds
+    "hit" | "cleared" | "uncertain" | "unrelated" per device, and
+    "outcome" is "candidate" (hit or uncertain related device),
+    "local" (related devices all cleared) or "out" (no inventoried
+    product involved)."""
+    ranges = (item or {}).get("cpe_ranges") or []
+    ranges_by_key = {}  # type: Dict[str, List[Dict[str, Any]]]
+    unmapped = []  # type: List[Dict[str, Any]]
+    item_keys = set()  # type: Set[str]
+    displays = []  # type: List[str]
+    range_lines = []  # type: List[str]
+    for rng in ranges:
+        if not isinstance(rng, dict):
+            continue
+        line = _range_display(rng)
+        if line not in range_lines:
+            range_lines.append(line)
+        key = _cpe_product_key(rng.get("vendor"), rng.get("product"))
+        if key is not None:
+            item_keys.add(key)
+            ranges_by_key.setdefault(key, []).append(rng)
+            display = _PRODUCT_KEY_DISPLAY.get(key, key)
+        else:
+            unmapped.append(rng)
+            display = ("%s %s" % (rng.get("vendor") or "",
+                                  rng.get("product") or "")).strip()
+        if display and display not in displays:
+            displays.append(display)
+    text = str((item or {}).get("text") or "")
+    lowered = text.lower()
+    for phrase, key in _TEXT_PRODUCT_PHRASES:
+        if re.search(r"(?<![a-z0-9])%s(?![a-z0-9])" % re.escape(phrase),
+                     lowered):
+            item_keys.add(key)
+            display = _PRODUCT_KEY_DISPLAY.get(key, key)
+            if display not in displays:
+                displays.append(display)
+
+    evals = []  # type: List[str]
+    any_related = False
+    for device, device_keys in zip(devices, device_keys_list):
+        shared = item_keys & device_keys
+        device_ranges = []  # type: List[Dict[str, Any]]
+        for key in shared:
+            device_ranges.extend(ranges_by_key.get(key) or [])
+        related = bool(shared)
+        for rng in unmapped:
+            display = ("%s %s" % (rng.get("vendor") or "",
+                                  rng.get("product") or "")).strip()
+            if display and product_matches(
+                    str(device.get("model") or ""), [display]):
+                related = True
+                device_ranges.append(rng)
+        if not related:
+            evals.append("unrelated")
+            continue
+        any_related = True
+        if not device_ranges:
+            evals.append("uncertain")
+            continue
+        outcomes = [_eval_range(str(device.get("version") or ""), rng)
+                    for rng in device_ranges]
+        if any(outcome is True for outcome in outcomes):
+            evals.append("hit")
+        elif all(outcome is False for outcome in outcomes):
+            evals.append("cleared")
+        else:
+            evals.append("uncertain")
+
+    if not any_related:
+        # No product-level relation: fall back to vendor-level.
+        # Same vendor but an unidentifiable product is uncertain
+        # (a candidate), never a clear - the screen only clears on
+        # structured ranges.
+        item_vendors = set()  # type: Set[str]
+        for rng in ranges:
+            if isinstance(rng, dict):
+                vendor_key = _cpe_vendor_key(rng.get("vendor"))
+                if vendor_key:
+                    item_vendors.add(vendor_key)
+        fleet_vendors = set(inventory_vendors(devices))
+        if not item_vendors:
+            for vendor in fleet_vendors:
+                display = VENDOR_DISPLAY_NAMES.get(vendor, vendor)
+                if vendor in lowered or display.lower() in lowered:
+                    item_vendors.add(vendor)
+        shared_vendors = item_vendors & fleet_vendors
+        if shared_vendors:
+            evals = [
+                "uncertain" if _device_vendor(device) in shared_vendors
+                else "unrelated"
+                for device in devices]
+            any_related = any(ev == "uncertain" for ev in evals)
+
+    has_hit = any(ev == "hit" for ev in evals)
+    if not any_related:
+        outcome = "out"
+    elif has_hit or any(ev == "uncertain" for ev in evals):
+        outcome = "candidate"
+    else:
+        outcome = "local"
+    return {"outcome": outcome, "evals": evals, "has_hit": has_hit,
+            "displays": displays, "range_lines": range_lines[:12]}
+
+
+def _merged_ranges_item(item):
+    # type: (Dict[str, Any]) -> Dict[str, Any]
+    """Copy of a feed item with its traced ranges (item
+    ["traced_ranges"], attached by trace_items from the vendor
+    original) folded into "cpe_ranges", so the one screening
+    evaluation sees every structured range the item carries,
+    whatever feed or vendor document it came from."""
+    merged = dict(item or {})
+    ranges = list(merged.get("cpe_ranges") or [])
+    for rng in merged.get("traced_ranges") or []:
+        if isinstance(rng, dict) and rng not in ranges:
+            ranges.append(rng)
+    merged["cpe_ranges"] = ranges
+    return merged
+
+
+def _evaluate_item(item, devices, device_keys_list=None):
+    # type: (Dict[str, Any], List[Dict[str, str]], Optional[List[Set[str]]]) -> Dict[str, Any]
+    """The single per-item screening evaluation (see
+    _screen_item), over the item's NVD CPE ranges PLUS any ranges
+    its vendor trace attached. screen_feed_items runs it on the
+    freshly collected items; run_feed_pipeline runs it again on
+    traced candidates, where the vendor original often settles a
+    record the feed left range-less. Returns _screen_item's
+    evaluation dict."""
+    if device_keys_list is None:
+        device_keys_list = [_device_product_keys(device)
+                            for device in devices]
+    return _screen_item(_merged_ranges_item(item), devices,
+                        device_keys_list)
+
+
+def _make_local_entry(item, devices, evaluation, kind, lang,
+                      budget=0):
+    # type: (Dict[str, Any], List[Dict[str, str]], Dict[str, Any], str, str, int) -> Dict[str, Any]
+    """Build a batch entry whose triage result was produced
+    LOCALLY (no Clocked calls), in the exact run_triage result
+    shape the renderer and the action summary consume.
+
+    kind "not_affected": screening cleared every related device -
+    verdict NOT AFFECTED. kind "budget": a candidate the deep-
+    triage budget did not reach - verdict CANNOT DETERMINE with
+    the reason stated plainly. Both carry basis "local-screen"
+    and the "Local version-range screen" source label."""
+    lang = _normalize_lang(lang)
+    reasons = REASON_STRINGS[lang]
+    displays = evaluation.get("displays") or []
+    product_label = ", ".join(displays) if displays \
+        else "the named product"
+    cve_id = _item_cve_id(item)
+    label = str((item or {}).get("label") or cve_id or "")
+    evals = evaluation.get("evals") or []
+    verdict = VERDICT_NOT_AFFECTED if kind == "not_affected" \
+        else VERDICT_CANNOT
+    device_rows = []  # type: List[Dict[str, Any]]
+    for device, ev in zip(devices, evals):
+        hostname = str(device.get("hostname") or "")
+        model = str(device.get("model") or "")
+        version = str(device.get("version") or "")
+        if ev == "unrelated":
+            device_rows.append(_row(
+                hostname, model, version, False, VERDICT_NOT_AFFECTED,
+                reasons["different_product"]))
+        elif kind == "not_affected":
+            device_rows.append(_row(
+                hostname, model, version, True, VERDICT_NOT_AFFECTED,
+                "Version %s is outside every vendor-published "
+                "affected range for %s (local version-range screen; "
+                "no API calls)." % (version, product_label)))
+        elif ev == "hit":
+            device_rows.append(_row(
+                hostname, model, version, True, VERDICT_CANNOT,
+                "Version %s falls inside a vendor-published "
+                "affected range for %s, but deep triage did not run "
+                "for this item (deep-triage budget %d) - unconfirmed."
+                % (version, product_label, budget)))
+        else:
+            device_rows.append(_row(
+                hostname, model, version, True, VERDICT_CANNOT,
+                "Local screening could not settle version %s "
+                "against the vendor-published ranges for %s, and "
+                "deep triage did not run for this item "
+                "(deep-triage budget %d)."
+                % (version, product_label, budget)))
+    if kind == "not_affected":
+        action_required = (
+            "No action required - fleet versions are outside every "
+            "vendor-published affected range for %s (screened "
+            "locally)." % product_label)
+        checklist = generate_checklist(VERDICT_NOT_AFFECTED,
+                                       "monitor", lang=lang)
+        warnings = []  # type: List[str]
+    else:
+        action_required = (
+            "Confirm the affected versions for %s manually, or "
+            "re-run with Judge all: structured screening was "
+            "inconclusive and this item was beyond this run's "
+            "deep-triage budget (%d)." % (product_label, budget))
+        checklist = [action_required] + generate_checklist(
+            VERDICT_CANNOT, "monitor", lang=lang)
+        warnings = [
+            "Deep-triage budget reached: this verdict comes from "
+            "local screening only - no Clocked calls were spent "
+            "on this item."]
+    ranges = (item or {}).get("cpe_ranges") or []
+    vendor_text = ""
+    if ranges and isinstance(ranges[0], dict):
+        vendor_text = str(ranges[0].get("vendor") or "")
+    extracted = {
+        "vendor": vendor_text,
+        "products": displays,
+        "affected_versions": evaluation.get("range_lines") or [],
+        "advisory_id": cve_id or label,
+        "cve_id": cve_id,
+        "severity": "",
+        "fixed_version": None,
+        "action_deadline": (item or {}).get("due_date") or None,
+    }
+    triage_result = {
+        "mode": "local",
+        "sample_id": None,
+        "basis": "local-screen",
+        "extracted": extracted,
+        "extract_raw": {"fields": {}},
+        "decide_raw": {},
+        "decide": {
+            "urgency_immediate": {"value": None, "probability": None},
+            "urgency_planned": {"value": None, "probability": None},
+            "evidence_sufficient": {"value": None,
+                                    "probability": None},
+            "urgency": "monitor",
+        },
+        "grounding_raw": {},
+        "grounding": {"verdict": "local-screen",
+                      "answers_question": None, "supported": True,
+                      "grounded": None, "ungrounded": None},
+        "device_results": device_rows,
+        "verdict": verdict,
+        "urgency": "monitor",
+        "warnings": warnings,
+        "conditions": [],
+        "claim": build_claim(verdict, device_rows, extracted),
+        "checklist": checklist,
+        "clocked_calls": 0,
+        "action_required": action_required,
+    }
+    hint = ""
+    for line in str((item or {}).get("text") or "").splitlines():
+        if line.strip():
+            hint = line.strip()[:80]
+            break
+    return {"url": str((item or {}).get("url") or ""),
+            "label": label,
+            "status": "ok",
+            "text_hint": hint,
+            "source_label": LOCAL_SCREEN_LABEL,
+            "basis": "local-screen",
+            "kev": bool((item or {}).get("kev")),
+            "published": str((item or {}).get("published") or ""),
+            "triage": triage_result}
+
+
+def screen_feed_items(items, inventory_text, lang="en"):
+    # type: (List[Dict[str, Any]], str, str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]
+    """Screen collected feed items against the inventory locally
+    (see the section header). Devices are parsed with triage's
+    parse_inventory - the same parser the judging path uses.
+
+    Returns (local_rows, candidates, screen_stats): local_rows
+    are batch entries with a locally produced NOT AFFECTED triage
+    result; candidates are the item dicts that still need deep
+    triage; screen_stats is {"collected", "not_in_fleet",
+    "local_not_affected", "candidates", "uncertain_candidates"}
+    where uncertain_candidates counts the candidates no device
+    was range-hit by (they are candidates on uncertainty alone).
+    """
+    devices = parse_inventory(inventory_text)
+    device_keys_list = [_device_product_keys(device)
+                        for device in devices]
+    local_rows = []  # type: List[Dict[str, Any]]
+    candidates = []  # type: List[Dict[str, Any]]
+    stats = {"collected": len(items or []), "not_in_fleet": 0,
+             "local_not_affected": 0, "candidates": 0,
+             "uncertain_candidates": 0}  # type: Dict[str, Any]
+    for item in items or []:
+        evaluation = _evaluate_item(item, devices, device_keys_list)
+        outcome = evaluation["outcome"]
+        if outcome == "out":
+            stats["not_in_fleet"] += 1
+        elif outcome == "local":
+            local_rows.append(_make_local_entry(
+                item, devices, evaluation, "not_affected", lang))
+            stats["local_not_affected"] += 1
+        else:
+            candidates.append(item)
+            stats["candidates"] += 1
+            if not evaluation["has_hit"]:
+                stats["uncertain_candidates"] += 1
+    return local_rows, candidates, stats
+
+
+# ---------------------------------------------------------------------------
+# Feed pipeline: collect a year -> screen locally -> trace ->
+# re-screen on the traced vendor ranges -> deep-triage only the
+# surviving candidates
+# ---------------------------------------------------------------------------
+
+def _candidate_order(items, hit_ids=None):
+    # type: (List[Dict[str, Any]], Optional[Set[int]]) -> List[Dict[str, Any]]
+    """Deep-triage priority: known-exploited (KEV) first, then
+    severity rank descending, then - within the same KEV/severity
+    tier - items some fleet device was range-HIT by (confirmed
+    exposure; `hit_ids` holds their id()) ahead of purely
+    uncertain ones, then most recently published. (Stable sorts
+    applied in reverse priority order.)"""
+    ordered = sorted(items, key=lambda it: str(it.get("published")
+                                               or ""),
+                     reverse=True)
+    if hit_ids:
+        ordered.sort(key=lambda it: 0 if id(it) in hit_ids else 1)
+    ordered.sort(key=lambda it: -int(it.get("severity_rank") or 0))
+    ordered.sort(key=lambda it: 0 if it.get("kev") else 1)
+    return ordered
+
+
+def _entry_verdict_rank(entry):
+    # type: (Dict[str, Any]) -> int
+    verdict = str(((entry or {}).get("triage") or {}).get("verdict")
+                  or "")
+    return {VERDICT_AFFECTED: 0, VERDICT_CANNOT: 1,
+            VERDICT_NOT_AFFECTED: 2}.get(verdict, 1)
+
+
+def run_feed_pipeline(inventory_text, api_key=None, lang="en",
+                      judge_all=False, progress=None, mock=False,
+                      nvd_fetcher=None, kev_fetcher=None,
+                      trace_fetcher=None, trace_json_fetcher=None,
+                      sleep=None, now=None):
+    # type: (str, Optional[str], str, bool, Optional[Callable[[int, int, str], None]], bool, Optional[Callable[[str], Any]], Optional[Callable[[str], Any]], Optional[Callable[[str], str]], Optional[Callable[[str], Any]], Optional[Callable[[float], None]], Optional[datetime.datetime]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]
+    """Run the feeds source end to end.
+
+    Collect a full year (collect_feed_items_year) -> screen
+    locally (screen_feed_items; zero API calls) -> trace the
+    candidates to their vendor originals (trace_items, up to
+    TRACE_SCREEN_CAP in priority order) -> RE-SCREEN each traced
+    candidate on the ranges its vendor document attached: when
+    every related fleet device clears, the candidate becomes a
+    local NOT AFFECTED row (vendor source label kept) and spends
+    NO deep-triage budget -> deep-triage the surviving candidates
+    with run_batch_items. Most fresh CVEs carry no NVD ranges at
+    all, so the trace is what makes the screen effective. The
+    deep-triage budget is FULL_TRIAGE_CAP, or JUDGE_ALL_CAP when
+    judge_all is set; candidates beyond it become local CANNOT
+    DETERMINE rows that say so plainly. Returns (rows, stats):
+    rows are batch entries sorted KEV first, then AFFECTED >
+    CANNOT DETERMINE > NOT AFFECTED, then newest published;
+    stats carries the per-feed outcome dicts, the collection
+    stats, the screening stats (whose local_not_affected count
+    includes the re-screened clears), the trace outcome,
+    "traced_for_screen" (candidates the trace-for-screen pass
+    attempted), "rescreened_not_affected" and the budget actually
+    used. In live mode (not mock, no injected fetchers) NVD
+    requests are spaced with time.sleep; `progress` is forwarded
+    to the deep-triage step.
+    """
+    if sleep is None and not mock and nvd_fetcher is None:
+        sleep = time.sleep
+    devices = parse_inventory(inventory_text)
+    device_keys_list = [_device_product_keys(device)
+                        for device in devices]
+    feed = collect_feed_items_year(
+        devices, mock=mock, nvd_fetcher=nvd_fetcher,
+        kev_fetcher=kev_fetcher, sleep=sleep, now=now)
+    local_rows, candidates, screen_stats = screen_feed_items(
+        feed["items"], inventory_text, lang=lang)
+    budget = JUDGE_ALL_CAP if judge_all else FULL_TRIAGE_CAP
+    hit_ids = set()  # type: Set[int]
+    for item in candidates:
+        if _evaluate_item(item, devices,
+                          device_keys_list)["has_hit"]:
+            hit_ids.add(id(item))
+    ordered = _candidate_order(candidates, hit_ids=hit_ids)
+    traced_pool, trace_stats = trace_items(
+        ordered[:TRACE_SCREEN_CAP], mock=mock,
+        fetcher=trace_fetcher, json_fetcher=trace_json_fetcher,
+        cap=TRACE_SCREEN_CAP)
+    rows = list(local_rows)  # type: List[Dict[str, Any]]
+    rescreened = 0
+    survivors = []  # type: List[Dict[str, Any]]
+    for item in traced_pool:
+        evaluation = _evaluate_item(item, devices, device_keys_list)
+        if evaluation["outcome"] == "local":
+            entry = _make_local_entry(
+                _merged_ranges_item(item), devices, evaluation,
+                "not_affected", lang)
+            # The verdict is local, but the evidence is the
+            # vendor's own document - the UI shows that source.
+            if (item or {}).get("source_label"):
+                entry["source_label"] = str(item["source_label"])
+            if (item or {}).get("source_url"):
+                entry["source_url"] = str(item["source_url"])
+            rows.append(entry)
+            rescreened += 1
+            continue
+        survivors.append(item)
+    survivors.extend(ordered[TRACE_SCREEN_CAP:])
+    judged_items = survivors[:budget]
+    over_items = survivors[budget:]
+    entries = run_batch_items(
+        judged_items, inventory_text, api_key=api_key, lang=lang,
+        progress=progress, prefilter=False)
+    for item, entry in zip(judged_items, entries):
+        entry["kev"] = bool((item or {}).get("kev"))
+        entry["published"] = str((item or {}).get("published") or "")
+        rows.append(entry)
+    for item in over_items:
+        evaluation = _evaluate_item(item, devices, device_keys_list)
+        rows.append(_make_local_entry(
+            _merged_ranges_item(item), devices, evaluation,
+            "budget", lang, budget=budget))
+    rows.sort(key=lambda e: str(e.get("published") or ""),
+              reverse=True)
+    rows.sort(key=_entry_verdict_rank)
+    rows.sort(key=lambda e: 0 if e.get("kev") else 1)
+    screen_stats["local_not_affected"] += rescreened
+    stats = {"nvd": feed["nvd"], "kev": feed["kev"],
+             "collection": feed["stats"], "screening": screen_stats,
+             "traced": trace_stats.get("traced", 0),
+             "trace_stats": trace_stats,
+             "traced_for_screen": trace_stats.get("attempted", 0),
+             "rescreened_not_affected": rescreened,
+             "deep_triaged": len(judged_items),
+             "budget": budget,
+             "candidates": len(candidates)}
+    return rows, stats
 
 
 def uploaded_file_to_item(name, data):
@@ -1401,25 +2391,185 @@ def _cna_vendor_text(data, cve_id):
     return "\n".join(lines)[:TRACE_TEXT_CAP]
 
 
+def _cna_traced_ranges(data, cap=40):
+    # type: (Any, int) -> List[Dict[str, Any]]
+    """Machine-readable affected ranges from a CVE 5.x record's
+    CNA affected[] - the same data _cna_vendor_text renders as
+    prose, kept in the range-dict shape _nvd_cpe_ranges produces
+    ({"vendor", "product", "exact", "start_including",
+    "start_excluding", "end_including", "end_excluding"}) so the
+    local screening can evaluate a traced record exactly like an
+    NVD configuration. Mapping: {version: B, lessThan: L} is
+    [B, L); version "0" is the CNA sentinel for "from the
+    beginning" (no lower bound); a lessThan list ("22.4R2-S2,
+    22.4R3") keeps the first, earliest-fix bound. A branch
+    wildcard (lessThan "21.1*", version "21.1*") degrades to a
+    lower bound only: it can hold an item as a candidate, never
+    produce a false clear. A boundless entry is one exact
+    version. Deduped, capped."""
+    ranges = []  # type: List[Dict[str, Any]]
+    seen = set()  # type: Set[Tuple[Any, ...]]
+    if not isinstance(data, dict):
+        return ranges
+    cna = (data.get("containers") or {}).get("cna") or {}
+    for entry in cna.get("affected") or []:
+        if not isinstance(entry, dict):
+            continue
+        vendor = str(entry.get("vendor") or "")
+        product = str(entry.get("product") or "").strip()
+        if not product:
+            continue
+        for version_entry in entry.get("versions") or []:
+            if not isinstance(version_entry, dict):
+                continue
+            if str(version_entry.get("status") or "") != "affected":
+                continue
+            base = str(version_entry.get("version") or "").strip()
+            less_than = str(version_entry.get("lessThan") or "")
+            less_than = less_than.split(",")[0].strip()
+            less_eq = str(version_entry.get("lessThanOrEqual")
+                          or "")
+            less_eq = less_eq.split(",")[0].strip()
+            wildcard = ("*" in less_than or "*" in less_eq
+                        or "*" in base)
+            if "*" in less_than:
+                less_than = ""
+            if "*" in less_eq:
+                less_eq = ""
+            rng = {"vendor": vendor, "product": product,
+                   "exact": None, "start_including": None,
+                   "start_excluding": None, "end_including": None,
+                   "end_excluding": None}  # type: Dict[str, Any]
+            if less_than:
+                rng["end_excluding"] = less_than
+            elif less_eq:
+                rng["end_including"] = less_eq
+            if rng["end_excluding"] or rng["end_including"]:
+                if base and base != "0" and "*" not in base:
+                    rng["start_including"] = base
+            elif base and base not in ("0", "*"):
+                if wildcard:
+                    prefix = base.replace("*", "").strip(" .")
+                    if not prefix:
+                        continue
+                    rng["start_including"] = prefix
+                else:
+                    rng["exact"] = base
+            else:
+                continue
+            key = (rng["vendor"], rng["product"], rng["exact"],
+                   rng["start_including"], rng["start_excluding"],
+                   rng["end_including"], rng["end_excluding"])
+            if key in seen:
+                continue
+            seen.add(key)
+            ranges.append(rng)
+            if len(ranges) >= cap:
+                return ranges
+    return ranges
+
+
+_CSAF_VERSION_TAIL_RE = re.compile(r"^(.+?)\s+(\d[\w.\-+]*)$")
+
+
+def _csaf_name_range(publisher, name):
+    # type: (str, str) -> Optional[Dict[str, Any]]
+    """One CSAF affected product name ("Cisco IOS XE Software
+    17.9.4") as an exact-version range dict, or None when the
+    name carries no trailing version token. CSAF product_status
+    enumerates affected product VERSIONS rather than ranges, so
+    exact is the honest mapping. The publisher's first word is
+    dropped from the front of the family when it repeats there,
+    so the product token resembles its CPE form
+    ("ios_xe_software")."""
+    match = _CSAF_VERSION_TAIL_RE.match(str(name or "").strip())
+    if not match:
+        return None
+    family = match.group(1).strip()
+    version = match.group(2)
+    if not family:
+        return None
+    words = family.split()
+    publisher_words = str(publisher or "").split()
+    if publisher_words and words \
+            and words[0].lower() == publisher_words[0].lower():
+        words = words[1:]
+    if not words:
+        return None
+    product = "_".join(word.lower() for word in words)
+    return {"vendor": str(publisher or ""), "product": product,
+            "exact": version, "start_including": None,
+            "start_excluding": None, "end_including": None,
+            "end_excluding": None}
+
+
+def _csaf_traced_ranges(data, cve_id, cap=40):
+    # type: (Any, str, int) -> List[Dict[str, Any]]
+    """Machine-readable affected ranges from a CSAF 2.0 document:
+    the product_status first_affected/known_affected product ids
+    of the chosen vulnerabilities (same selection as
+    _csaf_vendor_text), resolved to names via the product tree
+    and parsed into exact-version range dicts. Best effort:
+    names without a parseable version contribute nothing."""
+    ranges = []  # type: List[Dict[str, Any]]
+    seen = set()  # type: Set[Tuple[Any, ...]]
+    if not isinstance(data, dict):
+        return ranges
+    document = data.get("document") or {}
+    publisher = str((document.get("publisher") or {}).get("name")
+                    or "")
+    names = _csaf_product_names(data.get("product_tree") or {})
+    vulns = [v for v in data.get("vulnerabilities") or []
+             if isinstance(v, dict)]
+    chosen = [v for v in vulns
+              if str(v.get("cve") or "").upper() == cve_id] or vulns
+    for vuln in chosen:
+        status = vuln.get("product_status") or {}
+        for key in ("first_affected", "known_affected"):
+            for pid in status.get(key) or []:
+                name = names.get(str(pid), str(pid))
+                rng = _csaf_name_range(publisher, name)
+                if rng is None:
+                    continue
+                marker = (rng["vendor"], rng["product"],
+                          rng["exact"], rng["start_including"],
+                          rng["start_excluding"],
+                          rng["end_including"],
+                          rng["end_excluding"])
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                ranges.append(rng)
+                if len(ranges) >= cap:
+                    return ranges
+    return ranges
+
+
 def _trace_one(item, text_fetch, json_fetch):
-    # type: (Dict[str, Any], Callable[[str], str], Callable[[str], Any]) -> Optional[Tuple[str, str, str]]
+    # type: (Dict[str, Any], Callable[[str], str], Callable[[str], Any]) -> Optional[Tuple[str, str, str, List[Dict[str, Any]]]]
     """Follow one item to its vendor original. Returns
-    (vendor_text, source_url, source_label) or None when every
-    route fails. Route order: Cisco CSAF, Juniper JSA full text,
-    Arista CSAF, then the vendor-neutral CNA record."""
+    (vendor_text, source_url, source_label, traced_ranges) or
+    None when every route fails. traced_ranges are the vendor
+    document's affected ranges in screening range-dict shape
+    (empty for the JSA page-text route, which carries no
+    structure to parse). Route order: Cisco CSAF, Juniper JSA
+    full text, Arista CSAF, then the vendor-neutral CNA record."""
     cve_id = _item_cve_id(item)
     if not cve_id:
         return None
     refs = _item_references(item)
     csaf_url = _cisco_csaf_url(refs)
     if csaf_url:
+        data = None  # type: Any
         try:
-            text = _csaf_vendor_text(json_fetch(csaf_url), cve_id,
+            data = json_fetch(csaf_url)
+            text = _csaf_vendor_text(data, cve_id,
                                      "Cisco CSAF", csaf_url)
         except Exception:
             text = ""
         if text:
-            return text, csaf_url, "Cisco CSAF"
+            return (text, csaf_url, "Cisco CSAF",
+                    _csaf_traced_ranges(data, cve_id))
     jsa_url = _juniper_jsa_url(refs)
     if jsa_url:
         try:
@@ -1429,24 +2579,30 @@ def _trace_one(item, text_fetch, json_fetch):
         if fetched and len(fetched) >= JSA_MIN_TEXT_CHARS:
             body = ("Vendor advisory (Juniper JSA): %s\n%s"
                     % (jsa_url, fetched))[:TRACE_TEXT_CAP]
-            return body, jsa_url, "Juniper JSA"
+            return body, jsa_url, "Juniper JSA", []
     arista_url = _arista_csaf_url(refs)
     if arista_url:
+        data = None  # type: Any
         try:
-            text = _csaf_vendor_text(json_fetch(arista_url), cve_id,
+            data = json_fetch(arista_url)
+            text = _csaf_vendor_text(data, cve_id,
                                      "Arista CSAF", arista_url)
         except Exception:
             text = ""
         if text:
-            return text, arista_url, "Arista CSAF"
+            return (text, arista_url, "Arista CSAF",
+                    _csaf_traced_ranges(data, cve_id))
     record_url = cvelist_url(cve_id)
     if record_url:
+        data = None  # type: Any
         try:
-            text = _cna_vendor_text(json_fetch(record_url), cve_id)
+            data = json_fetch(record_url)
+            text = _cna_vendor_text(data, cve_id)
         except Exception:
             text = ""
         if text:
-            return text, record_url, "CVE CNA record"
+            return (text, record_url, "CVE CNA record",
+                    _cna_traced_ranges(data))
     return None
 
 
@@ -1484,7 +2640,11 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
     """Trace feed items to their vendor originals (see the
     section header). At most `cap` items are traced, in the given
     order; items beyond the cap and items without a CVE id pass
-    through untouched. Returns (items, stats) with stats
+    through untouched. A successful trace also attaches the
+    vendor document's structured affected ranges as
+    "traced_ranges" (screening range-dict shape) when the
+    document carries any - the feed pipeline re-screens on them.
+    Returns (items, stats) with stats
     {"traced", "attempted", "by_source"} - "attempted" counts the
     in-cap items that carried a CVE id (each tries the vendor
     routes, then the CNA fallback). Input items are not mutated.
@@ -1508,7 +2668,8 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
             stats["attempted"] += 1
             outcome = _trace_one(new_item, text_fetch, json_fetch)
             if outcome is not None:
-                vendor_text, source_url, source_label = outcome
+                (vendor_text, source_url, source_label,
+                 traced_ranges) = outcome
                 original_url = str(new_item.get("url") or "")
                 if original_url and original_url != source_url:
                     vendor_text += "\nNVD: %s" % original_url
@@ -1518,6 +2679,8 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
                 new_item["source_url"] = source_url
                 new_item["source_label"] = source_label
                 new_item["url"] = source_url
+                if traced_ranges:
+                    new_item["traced_ranges"] = traced_ranges
                 stats["traced"] += 1
                 by_source = stats["by_source"]
                 by_source[source_label] = by_source.get(
