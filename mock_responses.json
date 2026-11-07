@@ -1,4 +1,572 @@
 {
+ "feed_cve_2016_6894": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.9,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.04,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.18,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 13,
+     "p_verify": 0.99,
+     "start": 0,
+     "value": "CVE-2016-6894"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 97,
+       "p_verify": 0.99,
+       "start": 78,
+       "value": "4.15 before 4.15.8M"
+      },
+      {
+       "confidence": 0.99,
+       "end": 118,
+       "p_verify": 0.99,
+       "start": 99,
+       "value": "4.16 before 4.16.7M"
+      },
+      {
+       "confidence": 0.99,
+       "end": 143,
+       "p_verify": 0.99,
+       "start": 124,
+       "value": "4.17 before 4.17.0F"
+      }
+     ],
+     "value": [
+      "4.15 before 4.15.8M",
+      "4.16 before 4.16.7M",
+      "4.17 before 4.17.0F"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 13,
+     "p_verify": 0.99,
+     "start": 0,
+     "value": "CVE-2016-6894"
+    },
+    "fixed_version": {
+     "confidence": 0.9,
+     "p_verify": 0.9,
+     "value": "EOS 4.15.8M, 4.16.7M or 4.17.0F or later"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 26,
+       "p_verify": 0.99,
+       "start": 16,
+       "value": "Arista EOS"
+      },
+      {
+       "confidence": 0.99,
+       "end": 162,
+       "p_verify": 0.99,
+       "start": 147,
+       "value": "DCS-7050 series"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "Arista 7050"
+      }
+     ],
+     "value": [
+      "Arista EOS",
+      "DCS-7050 series",
+      "Arista 7050"
+     ]
+    },
+    "severity": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 22,
+     "p_verify": 0.99,
+     "start": 16,
+     "value": "Arista"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.9,
+   "claims": [
+    {
+     "claim": "verdict claim for this fixture",
+     "contradicted": 0.01,
+     "not_stated": 0.07,
+     "supported": 0.92,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.92,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.08,
+   "verdict": "grounded"
+  }
+ },
+ "feed_cve_2023_20198": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.97,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.95,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.9,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 214,
+     "p_verify": 0.99,
+     "start": 177,
+     "value": "cisco-sa-iosxe-webui-privesc-j22SaA4z"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 319,
+       "p_verify": 0.99,
+       "start": 313,
+       "value": "17.6.1"
+      },
+      {
+       "confidence": 0.99,
+       "end": 349,
+       "p_verify": 0.99,
+       "start": 343,
+       "value": "17.9.1"
+      },
+      {
+       "confidence": 0.99,
+       "end": 379,
+       "p_verify": 0.99,
+       "start": 373,
+       "value": "17.6.5"
+      },
+      {
+       "confidence": 0.99,
+       "end": 409,
+       "p_verify": 0.99,
+       "start": 403,
+       "value": "17.9.4"
+      }
+     ],
+     "value": [
+      "17.6.1",
+      "17.9.1",
+      "17.6.5",
+      "17.9.4"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 556,
+     "p_verify": 0.99,
+     "start": 542,
+     "value": "CVE-2023-20198"
+    },
+    "fixed_version": {
+     "confidence": 0.9,
+     "p_verify": 0.9,
+     "value": "IOS XE 17.9.4a or later (17.9 train); IOS XE 17.6.6a or later (17.6 train); IOS XE 17.3.8a or later (17.3 train); IOS XE 16.12.10a or later (16.12 train)"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 49,
+       "p_verify": 0.99,
+       "start": 28,
+       "value": "Cisco IOS XE Software"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "Catalyst 9300"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "ASR1002-X"
+      }
+     ],
+     "value": [
+      "Cisco IOS XE Software",
+      "Catalyst 9300",
+      "ASR1002-X"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 651,
+     "p_verify": 0.99,
+     "start": 643,
+     "value": "Critical"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 33,
+     "p_verify": 0.99,
+     "start": 28,
+     "value": "Cisco"
+    },
+    "workarounds": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 503,
+       "p_verify": 0.99,
+       "start": 435,
+       "value": "Cisco has released software updates that address this vulnerability."
+      }
+     ],
+     "value": [
+      "Cisco has released software updates that address this vulnerability."
+     ]
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.95,
+   "claims": [
+    {
+     "claim": "verdict claim for this fixture",
+     "contradicted": 0.01,
+     "not_stated": 0.03,
+     "supported": 0.96,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.96,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.04,
+   "verdict": "grounded"
+  }
+ },
+ "feed_cve_2023_36844": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.93,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.05,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.22,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 49,
+     "p_verify": 0.99,
+     "start": 35,
+     "value": "CVE-2023-36844"
+    },
+    "affected_versions": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 774,
+       "p_verify": 0.99,
+       "start": 743,
+       "value": "All versions prior to 20.4R3-S9"
+      },
+      {
+       "confidence": 0.99,
+       "end": 850,
+       "p_verify": 0.99,
+       "start": 818,
+       "value": "21.2 versions prior to 21.2R3-S7"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "21.3 versions prior to 21.3R3-S5"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "21.4 versions prior to 21.4R3-S5"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "22.1 versions prior to 22.1R3-S4"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "22.2 versions prior to 22.2R3-S2"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "22.3 versions prior to 22.3R3-S1"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "22.4 versions prior to 22.4R2-S2, 22.4R3"
+      },
+      {
+       "confidence": 0.99,
+       "p_verify": 0.99,
+       "value": "23.2 versions prior to 23.2R1-S1, 23.2R2"
+      }
+     ],
+     "value": [
+      "All versions prior to 20.4R3-S9",
+      "21.2 versions prior to 21.2R3-S7",
+      "21.3 versions prior to 21.3R3-S5",
+      "21.4 versions prior to 21.4R3-S5",
+      "22.1 versions prior to 22.1R3-S4",
+      "22.2 versions prior to 22.2R3-S2",
+      "22.3 versions prior to 22.3R3-S1",
+      "22.4 versions prior to 22.4R2-S2, 22.4R3",
+      "23.2 versions prior to 23.2R1-S1, 23.2R2"
+     ]
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 49,
+     "p_verify": 0.99,
+     "start": 35,
+     "value": "CVE-2023-36844"
+    },
+    "fixed_version": {
+     "confidence": 0.9,
+     "p_verify": 0.9,
+     "value": "Junos OS 20.4R3-S9, 21.2R3-S7, 21.3R3-S5, 21.4R3-S5, 22.1R3-S4, 22.2R3-S2, 22.3R3-S1, 22.4R2-S2 or 23.2R1-S1 (the fixed service release for the device's train)"
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 81,
+       "p_verify": 0.99,
+       "start": 60,
+       "value": "Junos OS on EX Series"
+      }
+     ],
+     "value": [
+      "Junos OS on EX Series"
+     ]
+    },
+    "severity": {
+     "confidence": 0.99,
+     "end": 1378,
+     "p_verify": 0.99,
+     "start": 1372,
+     "value": "Medium"
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 370,
+     "p_verify": 0.99,
+     "start": 354,
+     "value": "Juniper Networks"
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.92,
+   "claims": [
+    {
+     "claim": "verdict claim for this fixture",
+     "contradicted": 0.01,
+     "not_stated": 0.05,
+     "supported": 0.94,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.94,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.06,
+   "verdict": "grounded"
+  }
+ },
+ "feed_cve_2026_7473": {
+  "decide": {
+   "answers": {
+    "evidence_sufficient": {
+     "noul": 0.88,
+     "type": "noul"
+    },
+    "urgency_immediate": {
+     "noul": 0.42,
+     "type": "noul"
+    },
+    "urgency_planned": {
+     "noul": 0.78,
+     "type": "noul"
+    }
+   },
+   "model": "clocked-1.0"
+  },
+  "extract": {
+   "fields": {
+    "action_deadline": {
+     "confidence": 0.99,
+     "end": 98,
+     "p_verify": 0.99,
+     "start": 88,
+     "value": "2026-06-23"
+    },
+    "advisory_id": {
+     "confidence": 0.99,
+     "end": 17,
+     "p_verify": 0.99,
+     "start": 4,
+     "value": "CVE-2026-7473"
+    },
+    "affected_versions": {
+     "confidence": 0.0,
+     "items": [],
+     "value": []
+    },
+    "cve_id": {
+     "confidence": 0.99,
+     "end": 17,
+     "p_verify": 0.99,
+     "start": 4,
+     "value": "CVE-2026-7473"
+    },
+    "fixed_version": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "products": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 54,
+       "p_verify": 0.99,
+       "start": 20,
+       "value": "Arista Extensible Operating System"
+      },
+      {
+       "confidence": 0.99,
+       "end": 26,
+       "p_verify": 0.99,
+       "start": 20,
+       "value": "Arista"
+      }
+     ],
+     "value": [
+      "Arista Extensible Operating System",
+      "Arista"
+     ]
+    },
+    "severity": {
+     "confidence": 0.0,
+     "value": ""
+    },
+    "vendor": {
+     "confidence": 0.99,
+     "end": 26,
+     "p_verify": 0.99,
+     "start": 20,
+     "value": "Arista"
+    },
+    "workarounds": {
+     "confidence": 0.99,
+     "items": [
+      {
+       "confidence": 0.99,
+       "end": 374,
+       "p_verify": 0.99,
+       "start": 209,
+       "value": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable."
+      }
+     ],
+     "value": [
+      "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable."
+     ]
+    }
+   }
+  },
+  "grounding": {
+   "answers_question": 0.88,
+   "claims": [
+    {
+     "claim": "verdict claim for this fixture",
+     "contradicted": 0.01,
+     "not_stated": 0.09,
+     "supported": 0.9,
+     "verdict": "grounded"
+    }
+   ],
+   "grounded": 0.9,
+   "model": "clocked-1.0",
+   "threshold": 0.5,
+   "ungrounded": 0.1,
+   "verdict": "grounded"
+  }
+ },
  "sample1": {
   "decide": {
    "answers": {

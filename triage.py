@@ -31,9 +31,11 @@ Robustness features in the matcher:
     named in the reason, the warnings, and the checklist.
 
 Mock Mode: when no CLOCKED_API_KEY is available, canned responses from
-mock_responses.json are used for the bundled samples. Arbitrary
-pasted text in Mock Mode does NOT get a fabricated verdict; the caller
-is told a key is needed for live analysis.
+mock_responses.json are used for the bundled samples and for the
+exact texts the bundled feed fixtures produce (see
+detect_feed_fixture_id). Arbitrary pasted text in Mock Mode does
+NOT get a fabricated verdict; the caller is told a key is needed
+for live analysis.
 
 Display text (reasons, warnings, checklists) can be localized with
 run_triage(..., lang="ko"); verdict constants, the grounding claim,
@@ -1487,6 +1489,41 @@ def detect_sample_id(advisory_text, sample_id=None):
     return matched
 
 
+def detect_feed_fixture_id(advisory_text):
+    # type: (str) -> Optional[str]
+    """Identify the bundled feed fixture a text IS, for Mock Mode.
+
+    The feed pipeline's judged texts are composed at run time
+    (a feed summary, or vendor text + feed summary after a
+    vendor trace), so there is no single file to hash the way
+    the samples are hashed. Instead batch replays its own
+    deterministic mock stages over the bundled fixtures
+    (batch.bundled_feed_fixture_texts) and this function binds
+    by the same rule as the samples: SHA-256 over the stripped
+    text, exact match only. A CVE id appearing in the text -
+    or a text one character off a fixture-produced text - is
+    NOT sufficient. The batch import is lazy (batch imports
+    triage at module level) and any failure fails closed: no
+    canned verdict.
+    """
+    text = (advisory_text or "").strip()
+    if not text:
+        return None
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        import batch
+        mapping = batch.bundled_feed_fixture_texts()
+    except Exception:
+        return None
+    for key, texts in (mapping or {}).items():
+        for candidate in texts or []:
+            candidate_digest = hashlib.sha256(
+                str(candidate).strip().encode("utf-8")).hexdigest()
+            if candidate_digest == digest:
+                return key
+    return None
+
+
 # --------------------------------------------------------------------------
 # Live Clocked calls (the ONLY place the SDK is used)
 # --------------------------------------------------------------------------
@@ -1811,6 +1848,12 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
 
     if mode == "mock":
         detected = detect_sample_id(advisory_text, sample_id)
+        if detected is None:
+            # Not a bundled sample: the bundled feed fixtures
+            # are demo data too, and the exact texts the feed
+            # pipeline composes from them earn canned verdicts
+            # under the same exact-text binding.
+            detected = detect_feed_fixture_id(advisory_text)
         if detected is None:
             # The app passes mock=True both for "no key, Mock is
             # the only mode" and for "key configured, Demo override

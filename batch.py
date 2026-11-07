@@ -2830,6 +2830,59 @@ def trace_items(items, mock=False, fetcher=None, json_fetcher=None,
     return traced_items, stats
 
 
+_FEED_FIXTURE_TEXTS_CACHE = None  # type: Optional[Dict[str, List[str]]]
+
+
+def bundled_feed_fixture_texts():
+    # type: () -> Dict[str, List[str]]
+    """Exact advisory texts a Mock Mode feed run can hand to the
+    deep-triage judge, grouped by the canned-response key that
+    answers them ("feed_cve_2023_20198", ...).
+
+    Mock Mode judging serves canned Clocked responses ONLY for
+    bundled demo data bound to its exact text (the sample side is
+    triage.detect_sample_id). The feed fixtures are demo data
+    too, but their judged texts are not files: collection
+    composes them from the fixture payloads, and tracing rewrites
+    them again (vendor text + feed summary). This helper
+    therefore replays the deterministic mock stages -
+    collect_feed_items_year and trace_items over the BUNDLED
+    sample inventory - and returns every resulting item text,
+    raw and traced, so the mock judge can bind to exactly the
+    set the pipeline itself can produce. A text one character
+    off any of these is not bundled data and earns no canned
+    verdict. Cached after the first successful build: the
+    fixtures are static files.
+    """
+    global _FEED_FIXTURE_TEXTS_CACHE
+    if _FEED_FIXTURE_TEXTS_CACHE is not None:
+        return _FEED_FIXTURE_TEXTS_CACHE
+    texts = {}  # type: Dict[str, List[str]]
+    try:
+        inventory_text = (_SAMPLES_DIR / "inventory_sample.txt"
+                          ).read_text(encoding="utf-8")
+        devices = parse_inventory(inventory_text)
+        feed = collect_feed_items_year(devices, mock=True)
+        raw_items = feed["items"]
+        traced_items, _trace_stats = trace_items(
+            raw_items, mock=True, cap=TRACE_SCREEN_CAP)
+        for raw_item, traced_item in zip(raw_items, traced_items):
+            cve_id = _item_cve_id(raw_item)
+            if not cve_id:
+                continue
+            key = "feed_" + cve_id.lower().replace("-", "_")
+            bucket = texts.setdefault(key, [])
+            for item in (raw_item, traced_item):
+                text = str((item or {}).get("text") or "")
+                if text and text not in bucket:
+                    bucket.append(text)
+    except Exception:
+        texts = {}
+    if texts:
+        _FEED_FIXTURE_TEXTS_CACHE = texts
+    return texts
+
+
 # ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
