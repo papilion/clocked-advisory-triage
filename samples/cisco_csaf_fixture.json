@@ -1,0 +1,111 @@
+{
+ "document": {
+  "category": "csaf_security_advisory",
+  "csaf_version": "2.0",
+  "publisher": {
+   "category": "vendor",
+   "name": "Cisco",
+   "namespace": "https://wwww.cisco.com"
+  },
+  "title": "Multiple Vulnerabilities in Cisco IOS XE Software Web UI Feature",
+  "tracking": {
+   "current_release_date": "2023-11-01T15:44:28+00:00",
+   "id": "cisco-sa-iosxe-webui-privesc-j22SaA4z",
+   "initial_release_date": "2023-10-16T15:00:00+00:00",
+   "status": "final",
+   "version": "2.6.0"
+  }
+ },
+ "product_tree": {
+  "branches": [
+   {
+    "category": "vendor",
+    "name": "Cisco",
+    "branches": [
+     {
+      "category": "product_family",
+      "name": "Cisco IOS XE Software",
+      "branches": [
+       {
+        "category": "product_version",
+        "name": "17.6",
+        "branches": [
+         {
+          "category": "service_pack",
+          "name": "17.6.1",
+          "product": {
+           "name": "17.6.1",
+           "product_id": "CSAFPID-262592"
+          }
+         },
+         {
+          "category": "service_pack",
+          "name": "17.6.5",
+          "product": {
+           "name": "17.6.5",
+           "product_id": "CSAFPID-290660"
+          }
+         }
+        ]
+       },
+       {
+        "category": "product_version",
+        "name": "17.9",
+        "branches": [
+         {
+          "category": "service_pack",
+          "name": "17.9.1",
+          "product": {
+           "name": "17.9.1",
+           "product_id": "CSAFPID-278025"
+          }
+         },
+         {
+          "category": "service_pack",
+          "name": "17.9.4",
+          "product": {
+           "name": "17.9.4",
+           "product_id": "CSAFPID-295412"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "vulnerabilities": [
+  {
+   "cve": "CVE-2023-20198",
+   "notes": [
+    {
+     "category": "other",
+     "title": "Affected Product Comprehensiveness",
+     "text": "Complete."
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "CSAFPID-262592",
+     "CSAFPID-278025",
+     "CSAFPID-290660",
+     "CSAFPID-295412"
+    ]
+   },
+   "remediations": [
+    {
+     "category": "vendor_fix",
+     "details": "Cisco has released software updates that address this vulnerability.",
+     "product_ids": [
+      "CSAFPID-262592",
+      "CSAFPID-278025",
+      "CSAFPID-290660",
+      "CSAFPID-295412"
+     ]
+    }
+   ]
+  }
+ ]
+}

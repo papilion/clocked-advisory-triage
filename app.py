@@ -18,7 +18,8 @@ import streamlit as st
 
 from batch import (HARVEST_CAP, MAX_LINKS, collect_feed_items,
                    harvest_links, parse_inventory_csv, parse_link_list,
-                   run_batch, run_batch_items, uploaded_files_to_items)
+                   run_batch, run_batch_items, trace_items,
+                   uploaded_files_to_items)
 from triage import parse_inventory, run_triage
 
 ROOT = Path(__file__).resolve().parent
@@ -226,11 +227,15 @@ STRINGS = {
         "feeds_nvd_empty": "NVD: no CVEs found for the inventory vendors.",
         "feeds_nvd_failed": "NVD: feed could not be fetched (%s)",
         "feeds_nvd_no_vendors": (
-            "NVD: no known vendor (Cisco / Juniper / Arista / Nokia / "
-            "Extreme) found in the inventory models."
+            "NVD: no known vendor found in the inventory models."
         ),
         "feeds_kev_empty": "KEV: no catalog entries match the inventory.",
         "feeds_kev_failed": "KEV: feed could not be fetched (%s)",
+        "feeds_traced": (
+            "Vendor-traced: %d of %d advisories (sources: CSAF / "
+            "JSA / CNA)"
+        ),
+        "vendor_source": "Vendor source: %s \u2014 %s",
         "uploads_intro": (
             "Upload advisory pages you saved from your own browser - "
             "vendor portals often block automated collection, so your "
@@ -422,11 +427,12 @@ STRINGS = {
         "feeds_nvd_empty": "NVD: 인벤토리 벤더에 대한 CVE를 찾지 못했습니다.",
         "feeds_nvd_failed": "NVD: 피드를 가져오지 못했습니다 (%s)",
         "feeds_nvd_no_vendors": (
-            "NVD: 인벤토리 모델에서 알려진 벤더(Cisco / Juniper / "
-            "Arista / Nokia / Extreme)를 찾지 못했습니다."
+            "NVD: 인벤토리 모델에서 알려진 벤더를 찾지 못했습니다."
         ),
         "feeds_kev_empty": "KEV: 인벤토리와 일치하는 카탈로그 항목이 없습니다.",
         "feeds_kev_failed": "KEV: 피드를 가져오지 못했습니다 (%s)",
+        "feeds_traced": "제조사 원문 추적: %d/%d건 (출처: CSAF / JSA / CNA)",
+        "vendor_source": "제조사 원문: %s \u2014 %s",
         "uploads_intro": (
             "본인 브라우저에서 저장한 권고 페이지를 올리세요 — 벤더 "
             "포털은 자동 수집을 막는 경우가 많아, 수집은 브라우저가 "
@@ -744,6 +750,7 @@ def _render_batch_mode(s, lang):
     st.session_state.setdefault("batch_notice_listing", False)
     st.session_state.setdefault("batch_notice_uploads", False)
     st.session_state.setdefault("feed_info", None)
+    st.session_state.setdefault("trace_info", None)
     st.session_state.setdefault("batch_error_detail", None)
 
     st.subheader(s["links_heading"])
@@ -833,6 +840,7 @@ def _render_batch_mode(s, lang):
         st.session_state["batch_notice_uploads"] = False
         st.session_state["batch_error_detail"] = None
         st.session_state["feed_info"] = None
+        st.session_state["trace_info"] = None
 
         def _run_judging(runner):
             # type: (Any) -> None
@@ -884,21 +892,28 @@ def _render_batch_mode(s, lang):
         elif source == "feeds":
             # Collect first (queries derive from the inventory);
             # in Mock Mode the bundled fixtures are read instead of
-            # the network, so the demo path works offline.
+            # the network, so the demo path works offline. Then
+            # trace to the vendor originals, KEV items first -
+            # known-exploited entries get the trace budget before
+            # the merely-published NVD ones.
             st.session_state["batch_results"] = None
             try:
                 with st.spinner(s["feeds_running"]):
                     feed = collect_feed_items(
                         parse_inventory(devices_text),
                         mock=not _has_key())
+                    if feed is not None and feed["items"]:
+                        ordered = (list(feed["kev"]["items"])
+                                   + list(feed["nvd"]["items"]))
+                        items, trace_stats = trace_items(
+                            ordered, mock=not _has_key())
+                        st.session_state["trace_info"] = trace_stats
             except Exception:
                 feed = None
                 st.session_state["batch_error_detail"] = (
                     traceback.format_exc())
             if feed is not None:
                 st.session_state["feed_info"] = feed
-                if feed["items"]:
-                    items = list(feed["items"])
                 # Zero collected items: the per-feed status lines
                 # below explain the outcome; no batch is run.
         elif source == "uploads":
@@ -940,6 +955,13 @@ def _render_batch_mode(s, lang):
         kev_info = feed_info.get("kev") or {}
         st.caption(s["feeds_collected"] % (nvd_info.get("count", 0),
                                            kev_info.get("count", 0)))
+        trace_results = st.session_state.get("batch_results")
+        if st.session_state.get("trace_info") and trace_results:
+            traced_count = sum(
+                1 for entry in trace_results
+                if entry.get("source_label"))
+            st.caption(s["feeds_traced"] % (traced_count,
+                                            len(trace_results)))
         if nvd_info.get("status") == "empty":
             st.warning(s["feeds_nvd_empty"])
         elif nvd_info.get("status") == "no_vendors":
@@ -1161,6 +1183,10 @@ def _render_batch_results(results, s, lang):
             title = "%s - %s" % (title, verdict_display)
         with st.expander(title):
             st.caption(str(item.get("url") or item.get("label") or ""))
+            if item.get("source_label"):
+                st.caption(s["vendor_source"] % (
+                    item.get("source_label"),
+                    item.get("source_url") or item.get("url") or ""))
             if item.get("status") == "skipped":
                 st.info(s["skipped_reason"])
             elif item.get("status") != "ok":

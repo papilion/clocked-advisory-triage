@@ -36,6 +36,10 @@ guessed "not affected".
   app queries the official NVD API and the CISA KEV catalog for
   the inventory's vendors (in Mock Mode it reads bundled real-data
   fixtures and reports "NVD: 3 CVEs collected · KEV: 3 matches").
+  Before judging, each CVE is traced back to the vendor's own full
+  text — Cisco CSAF, Juniper JSA, or the vendor's CNA record — and
+  the caption reports how many were vendor-traced ("Vendor-traced:
+  3 of 6" in the mock run).
 - Or switch to **Upload advisory files**: advisories saved from
   your own browser (where the portals let you in) are judged
   exactly like fetched pages — the browser collects, the app

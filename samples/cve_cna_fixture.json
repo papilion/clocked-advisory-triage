@@ -1,0 +1,111 @@
+{
+ "cveMetadata": {
+  "cveId": "CVE-2023-36844",
+  "assignerShortName": "juniper",
+  "state": "PUBLISHED"
+ },
+ "containers": {
+  "cna": {
+   "providerMetadata": {
+    "shortName": "juniper"
+   },
+   "affected": [
+    {
+     "defaultStatus": "unaffected",
+     "platforms": [
+      "EX Series"
+     ],
+     "product": "Junos OS",
+     "vendor": "Juniper Networks",
+     "versions": [
+      {
+       "lessThan": "20.4R3-S9",
+       "status": "affected",
+       "version": "0",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "21.1*",
+       "status": "affected",
+       "version": "21.1",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "21.2R3-S6",
+       "status": "affected",
+       "version": "21.2",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "21.3R3-S5",
+       "status": "affected",
+       "version": "21.3",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "21.4R3-S5",
+       "status": "affected",
+       "version": "21.4",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "22.1R3-S4",
+       "status": "affected",
+       "version": "22.1",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "22.2R3-S2",
+       "status": "affected",
+       "version": "22.2",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "22.3R3-S1",
+       "status": "affected",
+       "version": "22.3",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "22.4R2-S2, 22.4R3",
+       "status": "affected",
+       "version": "22.4",
+       "versionType": "semver"
+      },
+      {
+       "lessThan": "23.2R1-S1, 23.2R2",
+       "status": "affected",
+       "version": "23.2",
+       "versionType": "semver"
+      }
+     ]
+    }
+   ],
+   "descriptions": [
+    {
+     "lang": "en",
+     "supportingMedia": [
+      {
+       "base64": false,
+       "type": "text/html",
+       "value": "A PHP External Variable Modification vulnerability in J-Web of Juniper Networks Junos OS on EX Series allows an unauthenticated, network-based attacker to control certain, important environment variables.<br><br>Using a crafted request an attacker is able to modify \n\ncertain PHP environment variables&nbsp;leading to partial loss of integrity,&nbsp;<span style=\"background-color: rgb(255, 255, 255);\">which may allow chaining to other vulnerabilities.</span><br><p>This issue affects Juniper Networks Junos OS on EX Series:</p><p></p><ul><li>All versions prior to 20.4R3-S9;</li><li>21.1 versions 21.1R1 and later;</li><li>21.2 versions prior to 21.2R3-S7;</li><li>21.3 versions \n\nprior to \n\n 21.3R3-S5;</li><li>21.4 versions \n\nprior to \n\n21.4R3-S5;</li><li>22.1 versions \n\nprior to \n\n22.1R3-S4;</li><li>22.2 versions \n\nprior to \n\n22.2R3-S2;</li><li>22.3 versions \n\nprior to 22.3R3-S1;</li><li>22.4 versions \n\nprior to \n\n22.4R2-S2, 22.4R3;</li><li>23.2 versions prior to \n\n23.2R1-S1, 23.2R2.</li></ul><p></p>"
+      }
+     ],
+     "value": "A PHP External Variable Modification vulnerability in J-Web of Juniper Networks Junos OS on EX Series allows an unauthenticated, network-based attacker to control certain, important environment variables.\n\nUsing a crafted request an attacker is able to modify \n\ncertain PHP environment variables\u00a0leading to partial loss of integrity,\u00a0which may allow chaining to other vulnerabilities.\nThis issue affects Juniper Networks Junos OS on EX Series:\n\n\n\n  *  All versions prior to 20.4R3-S9;\n  *  21.1 versions 21.1R1 and later;\n  *  21.2 versions prior to 21.2R3-S7;\n  *  21.3 versions \n\nprior to \n\n 21.3R3-S5;\n  *  21.4 versions \n\nprior to \n\n21.4R3-S5;\n  *  22.1 versions \n\nprior to \n\n22.1R3-S4;\n  *  22.2 versions \n\nprior to \n\n22.2R3-S2;\n  *  22.3 versions \n\nprior to 22.3R3-S1;\n  *  22.4 versions \n\nprior to \n\n22.4R2-S2, 22.4R3;\n  *  23.2 versions prior to \n\n23.2R1-S1, 23.2R2."
+    }
+   ],
+   "references": [
+    {
+     "tags": [
+      "vendor-advisory",
+      "mitigation"
+     ],
+     "url": "https://supportportal.juniper.net/JSA72300"
+    },
+    {
+     "url": "http://packetstormsecurity.com/files/174865/Juniper-SRX-Firewall-EX-Switch-Remote-Code-Execution.html"
+    }
+   ]
+  }
+ }
+}

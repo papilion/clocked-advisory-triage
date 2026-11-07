@@ -115,9 +115,10 @@ def test_nvd_collect_parse_sort_and_queries():
     assert result["count"] == 3
     assert result["queries"] == ["Cisco IOS XE", "Juniper Junos",
                                  "Arista EOS"]
-    # Newest first.
+    # Round-robin across vendors (newest first within each vendor),
+    # so the Arista item is not crowded out by Cisco's newer batch.
     assert [i["label"] for i in result["items"]] == [
-        "CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003"]
+        "CVE-2024-0001", "CVE-2024-0003", "CVE-2024-0002"]
     first = result["items"][0]
     assert first["url"] == ("https://nvd.nist.gov/vuln/detail/"
                             "CVE-2024-0001")
@@ -333,6 +334,72 @@ def test_uploaded_files_cap():
     assert items[0]["label"] == "f00.txt"
 
 
+# ------------------------- fleet-wide scope -------------------------
+# Analysis coverage is the whole fleet, not just network gear:
+# L4/load-balancer (ADC) gear, security appliances and servers are
+# detected, queried and prefiltered on the same footing.
+
+FLEET_INVENTORY = (
+    "LB-01, F5 BIG-IP 4200, 17.1.0\n"
+    "SRV-01, Windows Server 2022, 10.0.20348\n"
+    "FW-01, FortiGate 100F, 7.4.3\n"
+    "CORE-SW-01, Catalyst 9300, 17.9.4\n"
+)
+
+
+def test_fleet_wide_vendor_detection():
+    devices = parse_inventory(FLEET_INVENTORY)
+    vendors = inventory_vendors(devices)
+    assert "f5" in vendors
+    assert "microsoft" in vendors
+    assert "fortinet" in vendors
+    assert "cisco" in vendors
+
+
+def test_fleet_wide_derived_nvd_queries():
+    devices = parse_inventory(FLEET_INVENTORY)
+    terms = batch._nvd_query_terms(devices)
+    # One device each: the curated vendor wins the tie, then the
+    # rest follow VENDOR_TOKENS order with derived product terms.
+    assert terms == ["Cisco IOS XE", "F5 BIG-IP",
+                     "Fortinet FortiGate", "Microsoft Windows"]
+
+
+def test_fleet_wide_query_priority_by_device_count():
+    devices = parse_inventory(
+        "LB-01, F5 BIG-IP 4200, 17.1.0\n"
+        "LB-02, F5 BIG-IP 4200, 17.1.0\n"
+        "CORE-SW-01, Catalyst 9300, 17.9.4\n")
+    terms = batch._nvd_query_terms(devices)
+    # Two F5 devices outrank one Cisco device, curated map or not.
+    assert terms == ["F5 BIG-IP", "Cisco IOS XE"]
+
+
+def test_fleet_wide_prefilter_and_kev():
+    devices = parse_inventory(FLEET_INVENTORY)
+    tokens = batch.build_relevance_tokens(devices)
+    assert batch.is_relevant(
+        "F5 BIG-IP TMOS vulnerability in the load balancer "
+        "module", tokens)
+    assert batch.is_relevant(
+        "Microsoft Windows Server privilege escalation advisory",
+        tokens)
+    assert not batch.is_relevant(
+        "Acme OfficeJet Printer Firmware Advisory\n"
+        "A firmware update for office inkjet printers improves "
+        "photo printing quality.", tokens)
+    # KEV filtering keys off the same vendor detection + device
+    # tokens, so fleet vendors benefit with no separate change.
+    catalog = {"vulnerabilities": [
+        _kev_entry("CVE-2024-3001", "F5", "BIG-IP", "2024-03-01"),
+        _kev_entry("CVE-2024-3002", "Acme", "Printer Firmware",
+                   "2024-03-02"),
+    ]}
+    result = collect_kev_items(devices, fetcher=lambda url: catalog)
+    assert [i["label"] for i in result["items"]] == [
+        "KEV CVE-2024-3001"]
+
+
 # ------------------------- batch UI (AppTest) ------------------------
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -371,8 +438,15 @@ def test_feeds_source_mock_run_yields_summary():
     results = at.session_state["batch_results"]
     assert results is not None
     assert len(results) == 6
-    assert results[0]["label"] == "CVE-2023-20198"
-    assert results[3]["label"] == "KEV CVE-2026-7473"
+    # Judging runs KEV-first (known-exploited entries get the
+    # vendor-trace budget first), then the NVD items.
+    assert results[0]["label"] == "KEV CVE-2026-7473"
+    assert results[3]["label"] == "CVE-2023-20198"
+    # Mock Mode tracing resolves the fixture-backed routes: the
+    # Cisco NVD item via its CSAF fixture, both CVE-2023-36844
+    # items via the CNA fixture - shown in the traced caption.
+    captions = [c.value or "" for c in at.caption]
+    assert any("Vendor-traced: 3 of 6" in c for c in captions), captions
 
 
 def test_uploads_source_empty_run_shows_notice():

@@ -8,7 +8,10 @@ or **CANNOT DETERMINE** — with the evidence shown, not hidden.
 input mode.)
 
 Built for the **Clocked Build Challenge** by a network operator, for
-network operators. The honest third verdict is the point: when an
+network operators. Coverage is fleet-wide, not network-only: whatever
+appears in the uploaded inventory is in scope — network gear,
+security appliances (firewall / IPS / WAF / DDoS), load balancers
+and ADCs, and servers. The honest third verdict is the point: when an
 advisory does not state affected versions, this tool says so instead of
 guessing "not affected".
 
@@ -114,21 +117,49 @@ copy-pasting:
      with the reason.
    - **Vulnerability feeds (NVD / KEV)** — skip the portals
      entirely and query the official machine-readable feeds
-     instead: the **NVD CVE API** (one keyword query per vendor
-     actually present in your inventory — e.g. "Cisco IOS XE",
-     "Juniper Junos", "Arista EOS" — no API key needed) and CISA's
-     **Known Exploited Vulnerabilities** catalog (filtered locally
-     to your vendors and model families). Why: measured live, the
-     vendor portals block automated collection (Arista serves a
-     bot challenge; Cisco/Juniper listings are JavaScript shells),
-     while NVD and KEV are published precisely so machines can read
-     them. Each CVE becomes an advisory text (the NVD description
-     carries the affected-version prose; KEV's due date flows into
-     the Action block as the deadline) and is judged by the same
+     instead: the **NVD CVE API** (up to four keyword queries,
+     vendors prioritized by device count in your inventory — the
+     known network vendors use curated product keywords such as
+     "Cisco IOS XE", "Juniper Junos", "Arista EOS"; any other
+     fleet vendor present, from F5 to Microsoft, gets a derived
+     "<Vendor> <top product token>" query — no API key needed) and
+     CISA's **Known Exploited Vulnerabilities** catalog (filtered
+     locally to your vendors and model families). Why: measured
+     live, the vendor portals block automated collection (Arista
+     serves a bot challenge; Cisco/Juniper listings are JavaScript
+     shells), while NVD and KEV are published precisely so machines
+     can read them. Each CVE becomes an advisory text (the NVD
+     description carries the affected-version prose, and the NVD
+     CPE configuration ranges are appended as a structured
+     "affected ranges" section; KEV's due date flows into the
+     Action block as the deadline) and is judged by the same
      pipeline. Per-feed counts and honest empty/failed statuses are
      shown after the run. In Mock Mode this source reads bundled
      fixture files (real public CVE/KEV data, trimmed) instead of
      the network, so the demo works offline.
+   - **Vendor originals (full-text tracing)** — discovery is only
+     step one. Before judging, the app follows each collected CVE
+     back to the vendor's own full text (at most 10 items per run,
+     known-exploited KEV items first) and judges *that*, keeping
+     the feed summary appended below for reference. Routes:
+     **Cisco** — the advisory's public CSAF 2.0 JSON (affected
+     product names/versions composed from the product tree,
+     fixed-version lists, remediation text); **Juniper** — the
+     JSA article page itself, accepted only when the fetch yields
+     real article text (≥ 400 chars — the portal often answers
+     with a JavaScript shell instead); **Arista** — the derived
+     CSAF JSON URL; and, as a fallback for **every** vendor, the
+     vendor-submitted **CVE record (CNA)** from the CVEProject
+     cvelistV5 mirror — structured affected products, platforms
+     and version bounds (`version < lessThan`) in the vendor's own
+     submission. The CNA route is vendor-generic, so it covers the
+     security, load-balancer and server vendors in a fleet
+     inventory too, not just the network three. The UI shows how
+     many advisories were vendor-traced, and each result names its
+     vendor source with a link. When every route fails, the item
+     keeps its feed text and carries no vendor source — tracing
+     never borrows another advisory's content and never invents
+     one.
    - **Upload advisory files** — when a portal blocks the app but
      not you, save the advisory pages from your own browser and
      upload them (`.txt`, `.html`, `.htm`, `.md`, up to 10 files):
@@ -309,13 +340,14 @@ Mock Mode is a feature, not a shortcut:
 ```
 app.py               Streamlit UI only (Batch + Paste modes, EN/KO)
 triage.py            All Clocked SDK access, matcher, verdict composition
-batch.py             Batch support: CSV inventory parsing, advisory fetching, listing harvester, NVD/KEV feed collectors, upload conversion, batch runners
+batch.py             Batch support: CSV inventory parsing, advisory fetching, listing harvester, NVD/KEV feed collectors, vendor full-text tracing (CSAF/JSA/CNA), upload conversion, batch runners
 mock_responses.json  Canned Extract/Decide/Verify responses per sample
-samples/             7 synthetic advisories + sample inventory + NVD/KEV fixtures (real public data, trimmed)
+samples/             7 synthetic advisories + sample inventory + NVD/KEV/CSAF/CNA fixtures (real public data, trimmed)
 tests/test_triage.py Offline pytest suite (matcher + verdict composition)
 tests/test_app.py    AppTest suite (paste-mode widget state)
 tests/test_batch.py  Offline pytest suite (CSV, links, fetching, batch, batch UI)
-tests/test_feeds.py  Offline pytest suite (feed collectors, fixtures, uploads, items runner, feeds/uploads UI)
+tests/test_feeds.py  Offline pytest suite (feed collectors, fleet-wide vendors, fixtures, uploads, items runner, feeds/uploads UI)
+tests/test_trace.py  Offline pytest suite (vendor tracing routes, CNA fallback, caps, Mock Mode fixtures)
 .devcontainer/       One-click GitHub Codespaces environment (runs the app on port 8501)
 DEMO_SCRIPT.md       90-second demo video shot list
 ```
@@ -371,13 +403,23 @@ coverage for both input modes.
   machine-readable channels, and an upload lets the operator's own
   browser do the collecting.
 - **Feed coverage is keyword-shaped and recent-first.** The NVD
-  source issues one keyword query per inventory vendor, restricted
-  to CVEs published in the last 119 days (the API's date-window
-  cap; without it the API returns the oldest matches first),
-  10 results each, newest first, 15 items max — not an exhaustive
-  per-product CPE walk; KEV only lists vulnerabilities known to
-  be exploited.
+  source issues at most four keyword queries (vendors prioritized
+  by device count), restricted to CVEs published in the last
+  119 days (the API's date-window cap; without it the API returns
+  the oldest matches first), 10 results each, newest first,
+  15 items max — not an exhaustive per-product CPE walk; KEV only
+  lists vulnerabilities known to be exploited.
   Feeds complement vendor advisories, they do not replace them.
+- **Vendor tracing is capped and best-effort.** At most 10 feed
+  items per run are traced to vendor originals, known-exploited
+  (KEV) items first; the rest are judged on their feed text.
+  Measured live on 2026-11-07: Cisco CSAF JSON and the CNA mirror
+  return full structured data, while Juniper's JSA portal answered
+  a direct fetch with a 45-character shell — the ≥ 400-char
+  acceptance rule rejects that, and the CNA record supplied the
+  affected-version ranges instead. Arista's CSAF endpoint can
+  bot-challenge automated fetches; the same CNA fallback applies.
+  A failed trace is never dressed up as a traced one.
 - **The relevance prefilter is a coarse screen.** It only drops
   advisories that mention nothing in the inventory's product space
   at all; the per-device verdict logic is unchanged, and the
