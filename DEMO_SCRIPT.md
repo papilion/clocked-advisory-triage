@@ -1,20 +1,22 @@
-# Demo Video Script — 90 seconds
+# Demo Video Script — 8 shots (~1:45 EN / ~2:20 KO)
 
 Goal: show the listing-first batch workflow (a vendor **listing
 page** + inventory **CSV** — the app collects the advisory links
-itself), all three verdicts, the four Clocked calls per advisory,
-and the one idea that matters — an honest CANNOT DETERMINE beats a
-guessed "not affected".
+itself), the structured-source **vendor presets**, all three
+verdicts, the four Clocked calls per advisory, and the one idea
+that matters — an honest CANNOT DETERMINE beats a guessed
+"not affected".
 
 | Time | Shot | Narration / on-screen |
 |------|------|-----------------------|
-| 0:00–0:10 | Title card + app header in **Batch mode** (the default). Show the pitch line and the Mock/Live badge. | "Advisory Triage for Network Operators. Point it at a vendor's advisory listing and your inventory CSV — it collects the advisories, filters them to your fleet, and tells you what to do." |
-| 0:10–0:25 | In **Listing page (auto-collect)**, click the **Sample advisories (GitHub)** preset, then **Run Batch**: the "Found 7 advisory links" caption appears. Point at the inventory CSV area: upload a CSV, show the parsed preview and row counts — or note the bundled sample inventory fallback. | "Nobody pastes links one by one: the app harvests the listing page itself. Advisories that mention nothing in your fleet are skipped locally before a single API call. The CSV preview shows exactly what was parsed — encoding, headers, skipped rows." |
-| 0:25–0:40 | Show the **Action summary** at the top (only the advisories needing action, AFFECTED first, one line each with its link), then the **batch summary table**: seven rows — AFFECTED, NOT AFFECTED, CANNOT DETERMINE — with urgency, affected-device counts, and a conditions flag on the Arista row. | "First the answer to 'what do I have to do': the affected hosts, the version to upgrade to, the deadline. Then the full table for the record." |
-| 0:40–0:55 | Expand the Sample 1 detail. Zoom on the red **AFFECTED** card, urgency IMMEDIATE, Verify status, and the **Action required** block (affected hosts + fixed version + deadline); scroll the per-device table, extracted fields, Decide probabilities, and the checklist. | "Open any row for the full evidence: extracted fields, per-device matching done locally with zero API calls, Decide probabilities, and a checklist that matches the verdict." |
-| 0:55–1:10 | Expand the Sample 7 detail. Show the amber **CANNOT DETERMINE** card, the "Applicability conditions to verify" section (TerminAttr → CloudVision), the extracted workaround in the Action block, and the condition check at the top of the checklist. | "This Arista notice only applies when TerminAttr talks to CloudVision. The inventory can't confirm that — so instead of guessing, the app names the exact condition to check, plus the workaround the advisory itself states." |
-| 1:10–1:20 | Switch the mode toggle to **Paste (single advisory)**. Click **Sample 3**, Run. Show the amber CANNOT DETERMINE card and the warnings (insufficient evidence + Verify did not verify). | "Single paste mode is still there. This notice names a product family but no versions — most tools would guess; this one refuses, and tells you exactly what to go and get." |
-| 1:20–1:30 | Footer close-up: endpoints used, 4 calls per advisory, no data stored. End card with repo/demo links (TBD). | "Four Clocked calls per advisory — two Extract passes, Decide, and Verify, the grounding endpoint. Built by an operator, for operators." |
+| 0:00–0:13 | **Title card.** App name and tagline over the dark slide; "Built with Clocked API · Extract / Decide / Verify". | "Advisory Triage for Network Operators. Point it at a vendor's advisory listing and your inventory CSV — it collects the advisories, filters them to your fleet, and tells you exactly what to do." |
+| 0:13–0:26 | **Listing page (auto-collect)** run. The preset area shows the only URL preset left — **Sample advisories (GitHub)** — plus the **vendor preset row** (Cisco / Juniper / Arista / Nokia / Extreme Networks). Click the samples preset, **Run Batch**: the "Found 7 advisory link(s) on the listing page" caption and the **Action summary** heading are in frame, over the inventory CSV section (bundled sample inventory fallback noted). | "Nobody pastes links one by one. The app harvests the listing page itself, and advisories that mention nothing in your fleet are screened out locally — before a single API call." |
+| 0:26–0:35 | **Batch summary table**: seven rows — AFFECTED, NOT AFFECTED, CANNOT DETERMINE — with urgency, affected-device counts, and a conditions flag on the Arista row, under the tail of the Action summary. | "You get one table: affected, not affected, or honestly cannot determine — with urgency and affected-device counts." |
+| 0:35–0:52 | **Vendor preset (NEW).** Back in the Listing source, click the **Cisco** vendor preset, **Run Batch**. Frame holds the caption "Vendor listing — Cisco: collected from structured sources (NVD / CISA KEV + vendor original texts), last 365 days — not scraped from the vendor's web listing page.", the stage captions (collected / screened / vendor-traced), the Action summary line for the Cisco advisory with its CSAF link, and the batch table row: CVE-2023-20198 **AFFECTED**, immediate, 2 devices. | "Vendor listing pages are JavaScript-rendered or bot-walled, so presets for Cisco, Juniper, Arista, Nokia and Extreme collect from structured sources instead — NVD scoped by vendor, plus CISA KEV — and still trace every candidate to the vendor's own full text." |
+| 0:52–1:05 | Expand the **Sample 1** detail. The red **AFFECTED** card, urgency IMMEDIATE, Verify (grounding) status, and the **Action required** block (affected hosts + fixed version + deadline), over the extracted fields. | "Open a row for the full evidence: the affected hosts, the version to upgrade to, the deadline — extracted fields, local per-device matching, Decide probabilities, and a checklist." |
+| 1:05–1:19 | Expand the **Sample 7** detail. Show the amber **CANNOT DETERMINE** card, the "Applicability conditions to verify" section (TerminAttr → CloudVision), the extracted workaround in the Action block, and the condition check. | "This Arista notice only applies when TerminAttr talks to CloudVision. The inventory cannot confirm that — so instead of guessing, the app names the exact condition to check, plus the workaround from the advisory itself." |
+| 1:19–1:33 | Switch to **Paste (single advisory)**. Click **Sample 3**, Run. Show the amber CANNOT DETERMINE card and the warnings (insufficient evidence + Verify did not verify). | "Single paste mode is still there. This notice names a product family but no versions. Most tools would guess. This one refuses — and tells you exactly what to go and get." |
+| 1:33–1:45 | **End card**: the four-calls line, the live demo and source links. | "Four Clocked calls per advisory: two Extract passes, Decide, and Verify, the grounding endpoint. Built by an operator, for operators." |
 
 ## Recording notes
 
@@ -27,10 +29,16 @@ guessed "not affected".
   line.
 - Real vendor listings are honest about their limits (measured
   live): Cisco PSIRT and Juniper render their listings with
-  JavaScript, Arista sits behind a bot challenge — the app reports
-  "no links found" / "blocked" and points at Link list mode rather
-  than faking a harvest. Worth one line if it comes up; the GitHub
-  preset is the reliable on-stage path.
+  JavaScript, Arista sits behind a bot challenge — so the dead
+  vendor URL presets were **removed** (only the GitHub samples
+  preset remains as a URL preset). The **vendor presets** in the
+  Listing source (Cisco / Juniper / Arista / Nokia / Extreme
+  Networks) are the supported path: they collect from structured
+  sources (NVD scoped by vendor + CISA KEV) and trace candidates
+  to the vendor's own full text. Pasting a vendor listing URL by
+  hand earns a steering notice to the matching preset instead of
+  a dead "no links found" run. The GitHub preset is the reliable
+  on-stage URL path.
 - If a judge asks "so how do I feed it real vendor data?": switch
   the source to **Vulnerability feeds (NVD / KEV)** and Run — the
   app queries the official NVD API and the CISA KEV catalog for

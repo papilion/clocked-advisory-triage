@@ -32,7 +32,7 @@ verdict claim sent to Clocked Verify stays in English.
 ## Demo
 
 - Live demo: [advisory-triage.streamlit.app](https://advisory-triage.streamlit.app/)
-- Demo video: [Watch on YouTube](https://youtu.be/hM0aMLTS3VQ) (English narration, English/Korean subtitles) · [한국어 버전](https://youtu.be/0OD6NfKKMjE)
+- Demo video: [Watch on YouTube](https://youtu.be/YBKh0xRYNhk) (English narration, English/Korean subtitles) · [한국어 버전](https://youtu.be/Jj1_KyLQkEU)
 - No key? The app runs in **Mock Mode** with seven bundled synthetic
   samples — see below. No sign-up needed to try the demo path.
 
