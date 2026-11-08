@@ -5,7 +5,8 @@
 Give it a **list of advisory links** and your **device inventory as a
 CSV upload** — it fetches every advisory itself and returns **one
 defensible verdict** per advisory — **AFFECTED**, **NOT AFFECTED**,
-or **CANNOT DETERMINE** — with the evidence shown, not hidden.
+**CONDITION CHECK REQUIRED**, or **CANNOT DETERMINE** — with the
+evidence shown, not hidden.
 (Pasting a single advisory by hand is still available as the second
 input mode.)
 
@@ -13,9 +14,11 @@ Built for the **Clocked Build Challenge** by a network operator, for
 network operators. Coverage is fleet-wide, not network-only: whatever
 appears in the uploaded inventory is in scope — network gear,
 security appliances (firewall / IPS / WAF / DDoS), load balancers
-and ADCs, and servers. The honest third verdict is the point: when an
+and ADCs, and servers. The honest verdicts are the point: when an
 advisory does not state affected versions, this tool says so instead of
-guessing "not affected".
+guessing "not affected", and when a product+version match holds only
+under a condition the inventory cannot confirm, it says CONDITION
+CHECK REQUIRED instead of burying that in "cannot determine".
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/papilion/clocked-advisory-triage)
 
@@ -217,7 +220,8 @@ copy-pasting:
    - rows missing host, model, or version are skipped and counted,
      and the first parsed devices are previewed before you run.
 4. **Results** — an **Action summary** first (only the advisories
-   that need action, AFFECTED before CANNOT DETERMINE, one line
+   that need action, AFFECTED first, then CONDITION CHECK REQUIRED
+   and CANNOT DETERMINE, one line
    each with its link), then a summary table (verdict, urgency,
    affected-device count, conditions flag per advisory; skipped
    and fetch-failed items appear as their own rows), plus one
@@ -226,8 +230,14 @@ copy-pasting:
    for AFFECTED, the affected hostnames, the fixed version to
    upgrade to, the deadline, and any workaround the advisory
    states (extracted by the same focused Extract pass as the
-   applicability conditions); for CANNOT DETERMINE, the exact
+   applicability conditions); for CONDITION CHECK REQUIRED and
+   CANNOT DETERMINE, the exact
    conditions to verify; for NOT AFFECTED, "No action required."
+   Every verdict — the entry's and each device row's — also
+   carries a deterministic **reason code** (for example
+   `VERSION_TRAIN_EQUAL`, `KEV_NO_VERSION_RANGE`,
+   `CONDITION_UNVERIFIED`) naming the exact local rule that
+   produced it, shown in the detail view.
 
 Caps that keep a batch sane: at most **10 links** per Link-list
 run (extras are reported as skipped), **15** harvested links per
@@ -301,7 +311,7 @@ calls at all.
   catalog publishes no version ranges, so a KEV item whose
   product matches the fleet but for which neither NVD, KEV,
   nor a traced vendor original states affected versions
-  becomes a local **CANNOT DETERMINE** row ("KEV-listed product
+  becomes a local **CONDITION CHECK REQUIRED** row ("KEV-listed product
   matches this device; confirm the installed version is not
   affected") with the KEV due date, required action and
   ransomware flag as a checklist — never AFFECTED, never NOT
@@ -379,15 +389,23 @@ Inventory ──────► Local deterministic ◄───┘
    version token, while items with prose wording are never reduced
    to a token.
    When the explicit version list does not decide a device, the
-   normalized constraints are evaluated numerically instead; when the
-   numeric comparison is genuinely undecidable (e.g. EOS `4.30.5F`
+   normalized constraints are evaluated numerically instead. For
+   Arista EOS, two equality rules apply (ported from a production
+   advisory engine): an inclusive bound stated at train precision
+   (`4.31`) covers its whole train (`4.31.1F`), and a bound whose
+   numeric parts equal the device's with a suffix on only one side
+   (`4.36.0` vs `4.36.0F`) names the same release. Both are
+   equalities, never orderings: when the numeric comparison is
+   genuinely undecidable (e.g. EOS `4.30.5F`
    vs `4.30.5M` — suffix ordering is vendor-specific), the result is
    **CANNOT DETERMINE**, never a guess. A candidate device with an
    unparseable version, or a product match with no affected versions
    stated, is likewise **CANNOT DETERMINE** — never silently "not
    affected". And when the advisory carries applicability
    conditions, a product+version match is **gated** to
-   CANNOT DETERMINE: the inventory says nothing about the condition,
+   CONDITION CHECK REQUIRED — its own grade, since the match itself
+   is confirmed and only the condition is open: the inventory says
+   nothing about the condition,
    so the UI names it under "Applicability conditions to verify",
    adds a condition-check warning, and puts the concrete verification
    step at the top of the checklist.
@@ -435,7 +453,7 @@ invented hostnames, no real IPs, no real vendor text.
 | Sample 4 | Arista-style: Arista 7050SX3, EOS 4.30.4M/4.30.5M affected, High, fixed version + deadline | **AFFECTED** (DC-SW-01 runs 4.30.5M; DC-SW-02 is a 7050CX3 — a different product, not affected) |
 | Sample 5 | Juniper-style: QFX5110, Junos OS 21.2R1–21.2R3 affected, High, fixed version + deadline | **AFFECTED** (AGG-RTR-01 runs 21.2R3) |
 | Sample 6 | Juniper-style: MX480, affected versions stated only in prose — "Junos OS versions **prior to 21.4R2**", fixed 21.4R2, High | **AFFECTED** (CORE-RTR-01 runs 21.3R3, decided by the locally derived `before:21.4R2` constraint) |
-| Sample 7 | Arista-style: Arista 7050SX3, EOS 4.30.5M affected, but **only when TerminAttr is configured to talk to CloudVision (CVP)** | **CANNOT DETERMINE** (DC-SW-01 matches product + version, but the inventory cannot confirm the TerminAttr condition) |
+| Sample 7 | Arista-style: Arista 7050SX3, EOS 4.30.5M affected, but **only when TerminAttr is configured to talk to CloudVision (CVP)** | **CONDITION CHECK REQUIRED** (DC-SW-01 matches product + version, but the inventory cannot confirm the TerminAttr condition) |
 
 All three vendors — Cisco, Juniper, and Arista — have an **AFFECTED**
 demo case (Samples 1, 5, and 4). Samples 2 and 5 are both Juniper-style
@@ -512,7 +530,8 @@ coverage for both input modes.
 - **Applicability conditions are surfaced, not resolved.** The
   inventory format carries model and OS version only, so a condition
   like "TerminAttr configured for CVP" cannot be confirmed from it;
-  the tool gates the verdict to CANNOT DETERMINE and tells you
+  the tool gates the verdict to CONDITION CHECK REQUIRED and tells
+  you
   exactly what to check on the device. Feeding it a configuration
   inventory would let those verdicts resolve.
 - **Batch fetching is best-effort.** Batch mode downloads advisory

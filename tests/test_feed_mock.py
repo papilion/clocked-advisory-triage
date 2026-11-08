@@ -52,11 +52,12 @@ def test_mock_feed_pipeline_produces_verdicts_not_errors():
     rows, stats = run_feed_pipeline(INVENTORY_TEXT, mock=True)
     # Design section 3 (K-2): the range-less KEV-only item is a
     # local kev_unconfirmed row in Mock Mode too - it spends no
-    # deep-triage budget, so deep_triaged is 3, not 4. Its
-    # verdict is unchanged (CANNOT DETERMINE, asserted in the
-    # spread test below).
+    # deep-triage budget, so deep_triaged is 3, not 4. Its grade
+    # is the bgp-parity pass's intended change: CONDITION CHECK
+    # REQUIRED (asserted in the spread test below).
     assert stats["deep_triaged"] == 3
     assert stats["kev_unconfirmed"] == 1
+    assert stats["condition_check"] == 1
     judged = [row for row in _judged_rows(rows)
               if row["triage"]["mode"] == "mock"]
     assert len(judged) == 3
@@ -65,7 +66,8 @@ def test_mock_feed_pipeline_produces_verdicts_not_errors():
         result = row["triage"]
         assert result["mode"] == "mock"
         assert result["verdict"] in (
-            "AFFECTED", "NOT AFFECTED", "CANNOT DETERMINE")
+            "AFFECTED", "NOT AFFECTED", "CANNOT DETERMINE",
+            "CONDITION CHECK REQUIRED")
         # The failure this suite guards: every judged row used to
         # come back as the canned-responses error instead.
         assert not result.get("error")
@@ -73,8 +75,16 @@ def test_mock_feed_pipeline_produces_verdicts_not_errors():
     kev_row = [row for row in rows
                if row["label"] == "KEV CVE-2026-7473"][0]
     assert kev_row["basis"] == "local-screen"
-    assert kev_row["triage"]["verdict"] == "CANNOT DETERMINE"
+    assert kev_row["triage"]["verdict"] == "CONDITION CHECK REQUIRED"
     assert kev_row["triage"]["clocked_calls"] == 0
+    # Reason codes ride along in Mock Mode too - they are composed
+    # locally on both the judged and the local paths (design §2).
+    for row in judged:
+        assert row["triage"]["reason_code"]
+    assert kev_row["triage"]["reason_code"] == "KEV_NO_VERSION_RANGE"
+    assert {d["reason_code"]
+            for d in kev_row["triage"]["device_results"]
+            if d["candidate"]} == {"KEV_NO_VERSION_RANGE"}
 
 
 def test_mock_feed_pipeline_verdict_spread():
@@ -106,12 +116,13 @@ def test_mock_feed_pipeline_verdict_spread():
     assert all(d["status"] == "NOT AFFECTED" for d in arista.values())
 
     # CVE-2026-7473 is a KEV-only Arista EOS entry stating no
-    # affected versions at all: the Arista devices are candidates
-    # and the only honest verdict is CANNOT DETERMINE.
+    # affected versions at all: the Arista devices are candidates,
+    # the product match is settled, and the open question is the
+    # version check - CONDITION CHECK REQUIRED (the K-2 grade).
     result = by_label["KEV CVE-2026-7473"]["triage"]
-    assert result["verdict"] == "CANNOT DETERMINE"
+    assert result["verdict"] == "CONDITION CHECK REQUIRED"
     candidates = {d["hostname"] for d in result["device_results"]
-                  if d["status"] == "CANNOT DETERMINE"}
+                  if d["status"] == "CONDITION CHECK REQUIRED"}
     assert candidates == {"DC-SW-01", "DC-SW-02"}
 
 
@@ -121,7 +132,7 @@ def test_mock_feed_pipeline_judge_all_same_verdicts():
     verdicts = {row["label"]: row["triage"]["verdict"]
                 for row in _judged_rows(rows)}
     assert verdicts == {
-        "KEV CVE-2026-7473": "CANNOT DETERMINE",
+        "KEV CVE-2026-7473": "CONDITION CHECK REQUIRED",
         "CVE-2023-20198": "AFFECTED",
         "CVE-2023-36844": "NOT AFFECTED",
         "CVE-2016-6894": "NOT AFFECTED",

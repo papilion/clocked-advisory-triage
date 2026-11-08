@@ -16,9 +16,11 @@ import triage  # noqa: E402
 from triage import (  # noqa: E402
     VERDICT_AFFECTED,
     VERDICT_CANNOT,
+    VERDICT_CONDITION,
     VERDICT_NOT_AFFECTED,
     _live_extract,
     _live_grounding,
+    base_verdict,
     build_claim,
     compose_verdict,
     constraint_matches,
@@ -211,6 +213,56 @@ def test_compose_low_sufficiency_downgrade():
     )
     assert composed["verdict"] == VERDICT_CANNOT
     assert any("insufficient" in w for w in composed["warnings"])
+
+
+def test_compose_reason_code_inherited_from_deciding_row():
+    rows = [match_device(
+        device(model="Arista 7050SX3", version="4.31.1F"),
+        {"products": ["Arista 7050SX3"],
+         "affected_versions": ["EOS 4.31"]})]
+    composed = compose_verdict(rows, _decide(), _grounding(True))
+    assert composed["verdict"] == VERDICT_AFFECTED
+    assert composed["reason_code"] == "VERSION_TRAIN_EQUAL"
+    composed = compose_verdict(_clean_devices(), _decide("monitor"),
+                                _grounding(True))
+    assert composed["reason_code"] == "VERSION_OUT_OF_RANGE"
+
+
+def test_compose_reason_code_condition_survives_stages():
+    rows = [match_device(device(model="Arista 7050SX3",
+                                version="4.30.5M"),
+                         EXTRACT_CONDITIONAL)]
+    composed = compose_verdict(rows, _decide(), _grounding(True),
+                               conditions=[CONDITION_TEXT])
+    assert composed["verdict"] == VERDICT_CONDITION
+    assert composed["reason_code"] == "CONDITION_UNVERIFIED"
+
+
+def test_compose_reason_code_downgrade_overwrites():
+    # Sufficiency downgrade overwrites the inherited code...
+    composed = compose_verdict(
+        _affected_devices(),
+        _decide(evidence_prob=0.2, evidence_value=False),
+        _grounding(True))
+    assert composed["verdict"] == VERDICT_CANNOT
+    assert composed["reason_code"] == "EVIDENCE_INSUFFICIENT"
+    # ...and the grounding stage has the last word over both an
+    # inherited code and the sufficiency code (design §2.4).
+    composed = compose_verdict(
+        _affected_devices(),
+        _decide(evidence_prob=0.2, evidence_value=False),
+        _grounding(False))
+    assert composed["verdict"] == VERDICT_CANNOT
+    assert composed["reason_code"] == "GROUNDING_UNVERIFIED"
+    # A downgrade overrides a CONDITION base too (rule (d)).
+    rows = [match_device(device(model="Arista 7050SX3",
+                                version="4.30.5M"),
+                         EXTRACT_CONDITIONAL)]
+    composed = compose_verdict(
+        rows, _decide(evidence_prob=0.2, evidence_value=False),
+        _grounding(True), conditions=[CONDITION_TEXT])
+    assert composed["verdict"] == VERDICT_CANNOT
+    assert composed["reason_code"] == "EVIDENCE_INSUFFICIENT"
 
 
 def test_compose_low_sufficiency_downgrades_not_affected_too():
@@ -1010,7 +1062,9 @@ EXTRACT_CONDITIONAL = {
 def test_matcher_condition_gate_blocks_affected():
     result = match_device(device(model="Arista 7050SX3", version="4.30.5M"),
                           EXTRACT_CONDITIONAL)
-    assert result["status"] == VERDICT_CANNOT
+    # The match is confirmed; only the condition is open, so the
+    # row takes the CONDITION CHECK REQUIRED grade (bgp parity §3).
+    assert result["status"] == VERDICT_CONDITION
     assert result["candidate"] is True
     assert result["condition_gated"] is True
     assert "TerminAttr" in result["reason"]
@@ -1036,7 +1090,7 @@ def test_matcher_condition_gate_structured_conditions():
     extracted["conditions"] = [{"text": CONDITION_TEXT, "confidence": 0.99}]
     result = match_device(device(model="Arista 7050SX3", version="4.30.5M"),
                           extracted)
-    assert result["status"] == VERDICT_CANNOT
+    assert result["status"] == VERDICT_CONDITION
     assert result["condition_gated"] is True
 
 
@@ -1083,14 +1137,17 @@ def test_checklist_conditions_generic_and_ko():
     assert _has_hangul(ko_items[0])
 
 
-def test_mock_sample7_conditional_cannot_determine():
+def test_mock_sample7_conditional_condition_check_required():
     result = _run_sample("sample7", "sample7_arista_conditional.txt")
     assert result["mode"] == "mock"
-    assert result["verdict"] == VERDICT_CANNOT
+    # The one intended sample verdict change of the bgp-parity
+    # pass: gated (match confirmed, condition open) is its own
+    # grade now, no longer folded into CANNOT DETERMINE.
+    assert result["verdict"] == VERDICT_CONDITION
     assert result["clocked_calls"] == 4
     row = [r for r in result["device_results"]
            if r["hostname"] == "DC-SW-01"][0]
-    assert row["status"] == VERDICT_CANNOT
+    assert row["status"] == VERDICT_CONDITION
     assert row["condition_gated"] is True
     assert result["conditions"] == [CONDITION_TEXT]
     assert any("Condition check required" in w
@@ -1107,12 +1164,12 @@ def test_mock_sample7_conditional_cannot_determine():
 def test_mock_sample7_detected_by_exact_text_without_sample_id():
     result = _run_sample(None, "sample7_arista_conditional.txt")
     assert result["sample_id"] == "sample7"
-    assert result["verdict"] == VERDICT_CANNOT
+    assert result["verdict"] == VERDICT_CONDITION
 
 
-def test_mock_sample7_cannot_determine_ko():
+def test_mock_sample7_condition_check_required_ko():
     result = _run_sample_ko("sample7", "sample7_arista_conditional.txt")
-    assert result["verdict"] == VERDICT_CANNOT
+    assert result["verdict"] == VERDICT_CONDITION
     assert result["conditions"] == [CONDITION_TEXT]
     assert any("조건 확인 필요" in w for w in result["warnings"])
     row = [r for r in result["device_results"]
@@ -1241,7 +1298,7 @@ def test_live_run_triage_condition_gate_fires(monkeypatch):
     assert len(stub.extract_calls) == 2
     assert result["clocked_calls"] == 4
     assert result["conditions"] == [LIVE_CONDITION_TEXT]
-    assert result["verdict"] == VERDICT_CANNOT
+    assert result["verdict"] == VERDICT_CONDITION
     row = [r for r in result["device_results"]
            if r["hostname"] == "DC-SW-01"][0]
     assert row["condition_gated"] is True
@@ -1369,8 +1426,130 @@ def test_matcher_prefixed_version_feeds_condition_gate():
                  "applicability_conditions": [CONDITION_TEXT]}
     result = match_device(device(model="Arista 7050SX3",
                                  version="4.30.5M"), extracted)
-    assert result["status"] == VERDICT_CANNOT
+    assert result["status"] == VERDICT_CONDITION
     assert result["condition_gated"] is True
+
+
+# --------------------- reason codes (bgp parity §2) ------------------
+
+def test_reason_code_no_product_extracted():
+    result = match_device(device(), {"products": [],
+                                     "affected_versions": ["17.6.5"]})
+    assert result["reason_code"] == "PRODUCT_NOT_EXTRACTED"
+
+
+def test_reason_code_product_mismatch():
+    result = match_device(device(model="MX480", version="21.3R3"),
+                          EXTRACT_AFFECTED)
+    assert result["reason_code"] == "PRODUCT_MISMATCH"
+
+
+def test_reason_code_no_version_evidence():
+    result = match_device(
+        device(), {"products": ["Catalyst 9300"],
+                   "affected_versions": []})
+    assert result["reason_code"] == "NO_VERSION_EVIDENCE"
+
+
+def test_reason_code_unparseable_version():
+    result = match_device(device(version="unknown"),
+                          EXTRACT_AFFECTED)
+    assert result["reason_code"] == "VERSION_UNPARSEABLE"
+
+
+def test_reason_code_version_in_range():
+    result = match_device(device(), EXTRACT_AFFECTED)
+    assert result["status"] == VERDICT_AFFECTED
+    assert result["reason_code"] == "VERSION_IN_RANGE"
+
+
+def test_reason_code_train_and_suffix_equal():
+    extracted = {"products": ["Arista 7050SX3"],
+                 "affected_versions": ["EOS 4.31"]}
+    result = match_device(device(model="Arista 7050SX3",
+                                 version="4.31.1F"), extracted)
+    assert result["status"] == VERDICT_AFFECTED
+    assert result["reason_code"] == "VERSION_TRAIN_EQUAL"
+    extracted = {"products": ["Arista 7050SX3"],
+                 "affected_versions": ["EOS 4.36.0"]}
+    result = match_device(device(model="Arista 7050SX3",
+                                 version="4.36.0F"), extracted)
+    assert result["status"] == VERDICT_AFFECTED
+    assert result["reason_code"] == "VERSION_SUFFIX_EQUAL"
+
+
+def test_reason_code_suffix_mismatch():
+    # A both-suffix tie is incomparable through a version
+    # constraint (a plain list entry decides it as a non-match -
+    # the matcher's long-standing list semantics).
+    extracted = {"products": ["Arista 7050SX3"],
+                 "affected_versions": [],
+                 "version_constraints": ["up_to:4.30.5M"]}
+    result = match_device(device(model="Arista 7050SX3",
+                                 version="4.30.5F"), extracted)
+    assert result["status"] == VERDICT_CANNOT
+    assert result["reason_code"] == "VERSION_SUFFIX_MISMATCH"
+
+
+def test_reason_code_condition_gate():
+    result = match_device(device(model="Arista 7050SX3",
+                                 version="4.30.5M"),
+                          EXTRACT_CONDITIONAL)
+    assert result["reason_code"] == "CONDITION_UNVERIFIED"
+
+
+def test_reason_code_out_of_range():
+    result = match_device(device(model="MX480", version="21.4R3"),
+                          EXTRACT_CONSTRAINT)
+    assert result["status"] == VERDICT_NOT_AFFECTED
+    assert result["reason_code"] == "VERSION_OUT_OF_RANGE"
+
+
+def test_reason_code_train_entry_without_eos_context_decides():
+    # No EOS token anywhere: R1/R2 stay off, so a train-precision
+    # list entry against a patch release is a decided non-match
+    # (the generic comparator's plain-list semantics), never an
+    # R1 equality.
+    extracted = {"products": ["Catalyst 9300"],
+                 "affected_versions": ["17.6"]}
+    result = match_device(device(version="17.6.5"), extracted)
+    assert result["status"] == VERDICT_NOT_AFFECTED
+    assert result["reason_code"] == "VERSION_OUT_OF_RANGE"
+
+
+# ----------------- CONDITION grade precedence (A-1) ------------------
+
+def test_base_verdict_condition_precedence():
+    gated = match_device(device(model="Arista 7050SX3",
+                                version="4.30.5M"),
+                         EXTRACT_CONDITIONAL)
+    inconclusive = match_device(
+        device(model="Arista 7050CX3", version="4.31.2F"),
+        {"products": ["Arista 7050CX3"],
+         "affected_versions": [],
+         "version_constraints": ["up_to:4.31.2M"]})
+    assert inconclusive["status"] == VERDICT_CANNOT
+    # A-1: a gated row decides the entry over an inconclusive one.
+    assert base_verdict([gated, inconclusive]) == VERDICT_CONDITION
+    assert base_verdict([gated]) == VERDICT_CONDITION
+    affected = match_device(device(), EXTRACT_AFFECTED)
+    assert base_verdict([gated, affected]) == VERDICT_AFFECTED
+
+
+def test_build_claim_condition_grade_states_match_and_condition():
+    row = match_device(device(model="Arista 7050SX3",
+                              version="4.30.5M"), EXTRACT_CONDITIONAL)
+    claim = build_claim(VERDICT_CONDITION, [row], EXTRACT_CONDITIONAL)
+    assert "matches the affected product and version" in claim
+    assert "applies only when" in claim
+
+
+def test_checklist_condition_grade_verifies_conditions_first():
+    steps = generate_checklist(VERDICT_CONDITION, "monitor",
+                               conditions=[CONDITION_TEXT])
+    assert steps[0].startswith(
+        "On each matched device, check the running configuration")
+    assert len(steps) > 1
 
 
 def test_matcher_prose_items_not_reduced_to_tokens():
@@ -1574,3 +1753,106 @@ def test_live_non_credit_error_still_raises(monkeypatch):
     with pytest.raises(ValueError):
         run_triage("some advisory", "SW-01, Catalyst 9300, 17.9.4",
                    api_key="test-key")
+
+
+# ---------------- EOS equality rules R1/R2 (bgp parity) -------------
+#
+# Ported from the bgp-lookup advisory engine (DESIGN-BGP-PARITY §1):
+# R1 equates a train-precision bound ("4.31") with the train's patch
+# releases, R2 equates numeric-equal versions whose suffix is
+# one-sided ("4.36.0" == "4.36.0F"). Both apply ONLY under EOS
+# context; both-suffix disagreement (F vs M) stays incomparable.
+
+def test_compare_versions_eos_r1_train_equal():
+    cv = triage._compare_versions
+    # Bound at train precision: the train's patch releases equal it.
+    assert cv("4.31.1F", "4.31", eos_rules=True) == 0
+    # Symmetric: device at train precision, bound a train member.
+    assert cv("4.31", "4.31.1F", eos_rules=True) == 0
+    # Non-prefix numbers are real comparisons, never equalized.
+    assert cv("4.32.0F", "4.31", eos_rules=True) == 1
+    assert cv("4.30.9F", "4.31", eos_rules=True) == -1
+
+
+def test_compare_versions_eos_r2_suffix_equal():
+    cv = triage._compare_versions
+    assert cv("4.36.0F", "4.36.0", eos_rules=True) == 0
+    assert cv("4.36.0", "4.36.0F", eos_rules=True) == 0
+
+
+def test_compare_versions_eos_both_suffix_stays_none():
+    cv = triage._compare_versions
+    assert cv("4.30.5F", "4.30.5M", eos_rules=True) is None
+    assert cv("4.30.5F", "4.30.5M", eos_rules=False) is None
+
+
+def test_compare_versions_eos_detail_codes():
+    detail = triage._compare_versions_detail
+    assert detail("4.31.1F", "4.31", eos_rules=True) == \
+        (0, "train_equal")
+    assert detail("4.36.0F", "4.36.0", eos_rules=True) == \
+        (0, "suffix_equal")
+    assert detail("4.30.5F", "4.30.5M", eos_rules=True) == \
+        (None, "suffix_mismatch")
+    assert detail("bogus", "4.31", eos_rules=True) == \
+        (None, "unparseable")
+    assert detail("4.30.5F", "4.30.6F", eos_rules=True) == (-1, None)
+
+
+def test_compare_versions_default_flag_off_is_historical():
+    cv = triage._compare_versions
+    # Every R1/R2 case reverts to today's result without the flag:
+    # the opt-in default is what keeps every unmodified call site
+    # byte-identical.
+    assert cv("4.31.1F", "4.31") == 1
+    assert cv("4.36.0F", "4.36.0") is None
+    assert cv("4.36.0", "4.36.0F") is None
+    assert cv("4.30.5F", "4.30.5M") is None
+
+
+def test_constraint_matches_eos_semantics():
+    # Inclusive bound: a train member is inside via R1 equality.
+    assert constraint_matches(
+        "4.31.1F", {"relation": "up_to", "version": "4.31"},
+        eos_rules=True) is True
+    # Strict bound: equality means NOT before the train (§1.5) -
+    # R1 is equality, not membership.
+    assert constraint_matches(
+        "4.31.1F", {"relation": "before", "version": "4.31"},
+        eos_rules=True) is False
+    # Both-suffix tie stays unknown on the constraint path too.
+    assert constraint_matches(
+        "4.30.5F", {"relation": "before", "version": "4.30.5M"},
+        eos_rules=True) is None
+    # Without the flag the train member is simply above the bound.
+    assert constraint_matches(
+        "4.31.1F", {"relation": "up_to", "version": "4.31"}) is False
+
+
+def test_junos_bound_without_eos_context_stays_generic():
+    # A train-precision-looking bound must NOT gain prefix equality
+    # outside EOS context (the Junos hazard of §1.2): Junos already
+    # has train_before for explicit train membership.
+    assert constraint_matches(
+        "21.4R1", {"relation": "up_to", "version": "21.4"}) is False
+    assert triage._compare_versions("21.4R1", "21.4") == 1
+
+
+def test_matcher_eos_context_from_list_entry():
+    extracted = {"vendor": "Arista Networks",
+                 "products": ["Arista 7050SX3"],
+                 "affected_versions": ["EOS 4.36.0"]}
+    result = match_device(device(model="Arista 7050SX3",
+                                 version="4.36.0F"), extracted)
+    assert result["status"] == VERDICT_AFFECTED
+
+
+def test_matcher_no_eos_context_no_r2():
+    # Same version pair under a Cisco product with no EOS token
+    # anywhere: R2 must not fire - the exact entry simply does not
+    # list the suffixed release, exactly as before this pass.
+    extracted = {"vendor": "Cisco-style",
+                 "products": ["Catalyst 9300"],
+                 "affected_versions": ["4.36.0"]}
+    result = match_device(device(version="4.36.0F"), extracted)
+    assert result["status"] == VERDICT_NOT_AFFECTED

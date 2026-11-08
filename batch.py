@@ -35,10 +35,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from triage import (GENERIC_PRODUCT_WORDS, REASON_STRINGS,
                     VERDICT_AFFECTED, VERDICT_CANNOT,
-                    VERDICT_NOT_AFFECTED, _compare_versions,
-                    _normalize_lang, _product_core, _row, build_claim,
+                    VERDICT_CONDITION, VERDICT_NOT_AFFECTED,
+                    _compare_versions,
+                    _compare_versions_detail, _normalize_lang,
+                    _product_core, _row, build_claim,
                     generate_checklist, is_credit_error, parse_inventory,
-                    product_matches, run_triage, version_matches)
+                    product_matches, run_triage, version_matches,
+                    version_matches_detail)
 
 MAX_LINKS = 10
 HARVEST_CAP = 15
@@ -1696,9 +1699,9 @@ CREDIT_STRINGS = {
 
 # KEV local-screen strings (kind "kev_unconfirmed"): a KEV-listed
 # product match with no version range from any source earns a
-# dedicated CANNOT DETERMINE reason + checklist, never a firmer
-# verdict - KEV membership is priority evidence, not version
-# evidence (design rules K-2 / K-A / K-C).
+# dedicated CONDITION CHECK REQUIRED reason + checklist, never a
+# firmer verdict - KEV membership is priority evidence, not
+# version evidence (design rules K-2 / K-A / K-C).
 KEV_STRINGS = {
     "en": {
         "reason": ("In CISA KEV (known exploited) for %s, but "
@@ -1753,6 +1756,45 @@ KEV_STRINGS = {
                    "KEV(악용 확인)에 등재됐지만 어떤 소스도 영향 "
                    "버전 범위를 공개하지 않아 로컬 스크리닝으로 "
                    "확정할 수 없습니다."),
+    },
+}
+
+
+# Local-screen device-row sentences for _make_local_entry kinds
+# "not_affected" (cleared) and "budget" (hit / uncertain but never
+# deep-triaged), modelled on KEV_STRINGS. The EN templates
+# reproduce the sentences that used to be hardcoded in
+# _make_local_entry byte-for-byte; KO gains real translations
+# (previously a KO run showed these rows in English).
+LOCAL_ROW_STRINGS = {
+    "en": {
+        "cleared": ("Version %s is outside every vendor-published "
+                    "affected range for %s (local version-range "
+                    "screen; no API calls)."),
+        "hit_unjudged": ("Version %s falls inside a "
+                         "vendor-published affected range for %s, "
+                         "but deep triage did not run for this "
+                         "item (deep-triage budget %d) - "
+                         "unconfirmed."),
+        "uncertain_unjudged": ("Local screening could not settle "
+                               "version %s against the "
+                               "vendor-published ranges for %s, "
+                               "and deep triage did not run for "
+                               "this item (deep-triage budget %d)."),
+    },
+    "ko": {
+        "cleared": ("버전 %s은(는) %s에 대한 제조사 공개 영향 범위를 "
+                    "모두 벗어났습니다(로컬 버전 범위 스크리닝; API "
+                    "호출 없음)."),
+        "hit_unjudged": ("버전 %s은(는) %s에 대한 제조사 공개 영향 "
+                         "범위 안에 있지만, 이 항목은 심층 판정이 "
+                         "실행되지 않았습니다(심층 판정 예산 %d) - "
+                         "미확인."),
+        "uncertain_unjudged": ("로컬 스크리닝으로 버전 %s을(를) "
+                               "%s에 대한 제조사 공개 범위와 확정할 "
+                               "수 없었고, 이 항목은 심층 판정이 "
+                               "실행되지 않았습니다(심층 판정 "
+                               "예산 %d)."),
     },
 }
 
@@ -2200,19 +2242,39 @@ def _eval_range(device_version, rng):
     be made (unparseable version, or a numeric tie with differing
     letter suffixes - triage._compare_versions refuses to guess
     those, and so does the screen)."""
+    return _eval_range_detail(device_version, rng)[0]
+
+
+def _eval_range_detail(device_version, rng):
+    # type: (str, Dict[str, Any]) -> Tuple[Optional[bool], Optional[str]]
+    """_eval_range plus the deciding comparison's flavour:
+    "train_equal" / "suffix_equal" when an EOS equality rule
+    (R1/R2) decided a bound, "suffix_mismatch" / "unparseable"
+    when the evaluation is inconclusive for that reason, else
+    None. The bool is exactly _eval_range's result.
+
+    EOS context is resolved from the range dict itself: the
+    range's vendor/product must map to the "arista eos" fleet
+    product key - the same key _screen_item groups ranges by.
+    Unmapped ranges (key None) keep the generic comparison, so
+    R1/R2 can never leak into another vendor's ranges."""
+    eos = _cpe_product_key(rng.get("vendor"),
+                           rng.get("product")) == "arista eos"
     if rng.get("exact"):
-        result = version_matches(device_version, str(rng["exact"]))
+        result, detail = version_matches_detail(
+            device_version, str(rng["exact"]), eos_rules=eos)
         if result is False and "*" not in str(rng["exact"]) \
-                and "-" not in str(rng["exact"]) \
-                and _compare_versions(
-                    device_version, str(rng["exact"])) is None:
-            # A plain exact version whose comparison cannot be
-            # made (numeric tie with differing letter suffixes,
-            # e.g. EOS 4.30.5F vs 4.30.5M) is inconclusive, never
-            # a clear (invariant I-2).
-            return None
-        return result
-    checks = []  # type: List[Optional[bool]]
+                and "-" not in str(rng["exact"]):
+            compared, cmp_detail = _compare_versions_detail(
+                device_version, str(rng["exact"]), eos_rules=eos)
+            if compared is None:
+                # A plain exact version whose comparison cannot be
+                # made (numeric tie with differing letter suffixes,
+                # e.g. EOS 4.30.5F vs 4.30.5M) is inconclusive,
+                # never a clear (invariant I-2).
+                return None, cmp_detail
+        return result, detail
+    checks = []  # type: List[Tuple[Optional[bool], Optional[int], Optional[str]]]
     bounds = (
         ("start_including", lambda c: c >= 0),
         ("start_excluding", lambda c: c > 0),
@@ -2222,25 +2284,41 @@ def _eval_range(device_version, rng):
     for field, predicate in bounds:
         bound = rng.get(field)
         if bound:
-            compared = _compare_versions(device_version, str(bound))
-            checks.append(None if compared is None
-                          else bool(predicate(compared)))
+            compared, cmp_detail = _compare_versions_detail(
+                device_version, str(bound), eos_rules=eos)
+            checks.append((None if compared is None
+                            else bool(predicate(compared)),
+                           compared, cmp_detail))
     if not checks:
-        return None
-    if any(check is False for check in checks):
-        return False
-    if any(check is None for check in checks):
-        return None
-    return True
+        return None, None
+    if any(check is False for check, _compared, _detail in checks):
+        return False, None
+    if any(check is None for check, _compared, _detail in checks):
+        details = [detail for check, _compared, detail in checks
+                   if check is None]
+        if "suffix_mismatch" in details:
+            return None, "suffix_mismatch"
+        if "unparseable" in details:
+            return None, "unparseable"
+        return None, None
+    for _check, compared, cmp_detail in checks:
+        if compared == 0 \
+                and cmp_detail in ("train_equal", "suffix_equal"):
+            return True, cmp_detail
+    return True, None
 
 
 def _screen_item(item, devices, device_keys_list):
     # type: (Dict[str, Any], List[Dict[str, str]], List[Set[str]]) -> Dict[str, Any]
     """Screen one collected item against the inventory devices.
 
-    Returns {"outcome", "evals", "has_hit", "displays",
-    "range_lines"} where "evals" aligns with `devices` and holds
-    "hit" | "cleared" | "uncertain" | "unrelated" per device, and
+    Returns {"outcome", "evals", "eval_codes", "has_hit",
+    "displays", "range_lines"} where "evals" aligns with
+    `devices` and holds "hit" | "cleared" | "uncertain" |
+    "unrelated" per device, "eval_codes" is the parallel
+    reason-code list (design §2.2/§2.3: the deciding range's
+    flavour for a hit, the uncertainty precedence for an
+    uncertain device), and
     "outcome" is "candidate" (hit or uncertain related device),
     "local" (related devices all cleared) or "out" (no inventoried
     product involved)."""
@@ -2278,6 +2356,7 @@ def _screen_item(item, devices, device_keys_list):
                 displays.append(display)
 
     evals = []  # type: List[str]
+    eval_codes = []  # type: List[Optional[str]]
     any_related = False
     for device, device_keys in zip(devices, device_keys_list):
         shared = item_keys & device_keys
@@ -2285,24 +2364,38 @@ def _screen_item(item, devices, device_keys_list):
         for key in shared:
             device_ranges.extend(ranges_by_key.get(key) or [])
         related = bool(shared)
+        unmapped_related = False
         for rng in unmapped:
             display = ("%s %s" % (rng.get("vendor") or "",
                                   rng.get("product") or "")).strip()
             if display and product_matches(
                     str(device.get("model") or ""), [display]):
                 related = True
+                unmapped_related = True
                 device_ranges.append(rng)
         if not related:
             evals.append("unrelated")
+            eval_codes.append("PRODUCT_MISMATCH")
             continue
         any_related = True
         if not device_ranges:
             evals.append("uncertain")
+            eval_codes.append("NO_VERSION_EVIDENCE")
             continue
-        outcomes = [_eval_range(str(device.get("version") or ""), rng)
-                    for rng in device_ranges]
+        detailed = [_eval_range_detail(
+            str(device.get("version") or ""), rng)
+            for rng in device_ranges]
+        outcomes = [outcome for outcome, _detail in detailed]
         if any(outcome is True for outcome in outcomes):
             evals.append("hit")
+            hit_details = [detail for outcome, detail in detailed
+                           if outcome is True]
+            if "train_equal" in hit_details:
+                eval_codes.append("VERSION_TRAIN_EQUAL")
+            elif "suffix_equal" in hit_details:
+                eval_codes.append("VERSION_SUFFIX_EQUAL")
+            else:
+                eval_codes.append("VERSION_IN_RANGE")
         elif all(outcome is False for outcome in outcomes):
             # A clear from partially parsed ranges (JSA prose
             # extraction) is not evidence of absence: downgrade
@@ -2310,10 +2403,23 @@ def _screen_item(item, devices, device_keys_list):
             # hit - the device is inside a stated branch.
             if any(rng.get("partial") for rng in device_ranges):
                 evals.append("uncertain")
+                eval_codes.append("RANGE_PARTIAL")
             else:
                 evals.append("cleared")
+                eval_codes.append("VERSION_OUT_OF_RANGE")
         else:
             evals.append("uncertain")
+            details = [detail for _outcome, detail in detailed]
+            if "suffix_mismatch" in details:
+                eval_codes.append("VERSION_SUFFIX_MISMATCH")
+            elif "unparseable" in details:
+                eval_codes.append("VERSION_UNPARSEABLE")
+            elif any(rng.get("partial") for rng in device_ranges):
+                eval_codes.append("RANGE_PARTIAL")
+            elif unmapped_related:
+                eval_codes.append("PRODUCT_UNMAPPED")
+            else:
+                eval_codes.append("VERSION_INCONCLUSIVE")
 
     if not any_related:
         # No product-level relation: fall back to vendor-level.
@@ -2338,6 +2444,10 @@ def _screen_item(item, devices, device_keys_list):
                 "uncertain" if _device_vendor(device) in shared_vendors
                 else "unrelated"
                 for device in devices]
+            eval_codes = [
+                "PRODUCT_UNMAPPED" if ev == "uncertain"
+                else "PRODUCT_MISMATCH"
+                for ev in evals]
             any_related = any(ev == "uncertain" for ev in evals)
 
     has_hit = any(ev == "hit" for ev in evals)
@@ -2347,7 +2457,8 @@ def _screen_item(item, devices, device_keys_list):
         outcome = "candidate"
     else:
         outcome = "local"
-    return {"outcome": outcome, "evals": evals, "has_hit": has_hit,
+    return {"outcome": outcome, "evals": evals,
+            "eval_codes": eval_codes, "has_hit": has_hit,
             "displays": displays, "range_lines": range_lines[:12]}
 
 
@@ -2395,9 +2506,11 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
     triage budget did not reach - verdict CANNOT DETERMINE with
     the reason stated plainly. kind "kev_unconfirmed": a KEV item
     whose product matches but for which no source publishes a
-    version range - verdict CANNOT DETERMINE with the dedicated
-    KEV reason, condition and checklist (KEV membership alone
-    never settles a version verdict). All carry basis
+    version range - verdict CONDITION CHECK REQUIRED with the
+    dedicated KEV reason, condition and checklist (the product
+    match is the settled fact; the open question is exactly the
+    version/condition check - KEV membership alone never settles
+    more than that). All carry basis
     "local-screen" and the "Local version-range screen" source
     label. `today` (a datetime.date) drives the overdue-due-date
     warning deterministically; it defaults to the real today."""
@@ -2409,43 +2522,49 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
     cve_id = _item_cve_id(item)
     label = str((item or {}).get("label") or cve_id or "")
     evals = evaluation.get("evals") or []
-    verdict = VERDICT_NOT_AFFECTED if kind == "not_affected" \
-        else VERDICT_CANNOT
+    if kind == "not_affected":
+        verdict = VERDICT_NOT_AFFECTED
+    elif kind == "kev_unconfirmed":
+        verdict = VERDICT_CONDITION
+    else:
+        verdict = VERDICT_CANNOT
+    eval_codes = evaluation.get("eval_codes") or []
+    row_strings = LOCAL_ROW_STRINGS[lang]
     device_rows = []  # type: List[Dict[str, Any]]
-    for device, ev in zip(devices, evals):
+    for index, (device, ev) in enumerate(zip(devices, evals)):
         hostname = str(device.get("hostname") or "")
         model = str(device.get("model") or "")
         version = str(device.get("version") or "")
+        eval_code = eval_codes[index] \
+            if index < len(eval_codes) else None
         if ev == "unrelated":
             device_rows.append(_row(
                 hostname, model, version, False, VERDICT_NOT_AFFECTED,
-                reasons["different_product"]))
+                reasons["different_product"],
+                reason_code="PRODUCT_MISMATCH"))
         elif kind == "not_affected":
             device_rows.append(_row(
                 hostname, model, version, True, VERDICT_NOT_AFFECTED,
-                "Version %s is outside every vendor-published "
-                "affected range for %s (local version-range screen; "
-                "no API calls)." % (version, product_label)))
+                row_strings["cleared"] % (version, product_label),
+                reason_code=eval_code or "VERSION_OUT_OF_RANGE"))
         elif kind == "kev_unconfirmed":
             device_rows.append(_row(
-                hostname, model, version, True, VERDICT_CANNOT,
+                hostname, model, version, True, VERDICT_CONDITION,
                 KEV_STRINGS[lang]["reason"] % (product_label,
-                                               version)))
+                                               version),
+                reason_code="KEV_NO_VERSION_RANGE"))
         elif ev == "hit":
             device_rows.append(_row(
                 hostname, model, version, True, VERDICT_CANNOT,
-                "Version %s falls inside a vendor-published "
-                "affected range for %s, but deep triage did not run "
-                "for this item (deep-triage budget %d) - unconfirmed."
-                % (version, product_label, budget)))
+                row_strings["hit_unjudged"] % (
+                    version, product_label, budget),
+                reason_code=eval_code or "VERSION_IN_RANGE"))
         else:
             device_rows.append(_row(
                 hostname, model, version, True, VERDICT_CANNOT,
-                "Local screening could not settle version %s "
-                "against the vendor-published ranges for %s, and "
-                "deep triage did not run for this item "
-                "(deep-triage budget %d)."
-                % (version, product_label, budget)))
+                row_strings["uncertain_unjudged"] % (
+                    version, product_label, budget),
+                reason_code=eval_code or "VERSION_INCONCLUSIVE"))
     if kind == "not_affected":
         action_required = (
             "No action required - fleet versions are outside every "
@@ -2470,7 +2589,7 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
         if ransomware == "Known":
             kev_steps.append(kev_strings["check_ransomware"])
         checklist = kev_steps + generate_checklist(
-            VERDICT_CANNOT, "monitor", lang=lang)
+            VERDICT_CONDITION, "monitor", lang=lang)
         warnings = []
         run_today = today or datetime.date.today()
         due_parsed = _parse_iso_date(due_date)
@@ -2525,6 +2644,9 @@ def _make_local_entry(item, devices, evaluation, kind, lang,
                       "grounded": None, "ungrounded": None},
         "device_results": device_rows,
         "verdict": verdict,
+        "reason_code": {"not_affected": "SCREEN_CLEARED",
+                        "kev_unconfirmed": "KEV_NO_VERSION_RANGE",
+                        "budget": "BUDGET_EXHAUSTED"}[kind],
         "urgency": "monitor",
         "warnings": warnings,
         "conditions": conditions,
@@ -2630,8 +2752,9 @@ def _entry_verdict_rank(entry):
     # type: (Dict[str, Any]) -> int
     verdict = str(((entry or {}).get("triage") or {}).get("verdict")
                   or "")
-    return {VERDICT_AFFECTED: 0, VERDICT_CANNOT: 1,
-            VERDICT_NOT_AFFECTED: 2}.get(verdict, 1)
+    return {VERDICT_AFFECTED: 0, VERDICT_CONDITION: 1,
+            VERDICT_CANNOT: 2,
+            VERDICT_NOT_AFFECTED: 3}.get(verdict, 2)
 
 
 def run_feed_pipeline(inventory_text, api_key=None, lang="en",
@@ -2661,7 +2784,8 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     judge_all is set; candidates beyond it become local CANNOT
     DETERMINE rows that say so plainly. Returns (rows, stats):
     rows are batch entries sorted KEV first, then AFFECTED >
-    CANNOT DETERMINE > NOT AFFECTED, then newest published;
+    CONDITION CHECK REQUIRED > CANNOT DETERMINE > NOT AFFECTED,
+    then newest published;
     stats carries the per-feed outcome dicts, the collection
     stats, the screening stats (whose local_not_affected count
     includes the re-screened clears), the trace outcome,
@@ -2781,6 +2905,14 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
     rows.sort(key=lambda e: 0 if e.get("kev") else 1)
     screen_stats["local_not_affected"] += rescreened
     reachability = {} if mock else probe_sources()
+    # Additive stat: entries whose final verdict is the CONDITION
+    # grade (K-2 local rows plus any deep-triaged gated entries).
+    # No existing key is renamed - "kev_unconfirmed" still counts
+    # the K-2 rows specifically.
+    condition_check = sum(
+        1 for row in rows
+        if str((row.get("triage") or {}).get("verdict") or "")
+        == VERDICT_CONDITION)
     stats = {"nvd": feed["nvd"], "kev": feed["kev"],
              "vendor": vendor,
              "collection": feed["stats"], "screening": screen_stats,
@@ -2790,6 +2922,7 @@ def run_feed_pipeline(inventory_text, api_key=None, lang="en",
              "rescreened_not_affected": rescreened,
              "deep_triaged": len(judged_items),
              "kev_unconfirmed": len(kev_local_items),
+             "condition_check": condition_check,
              "reachability": reachability,
              "budget": budget,
              "candidates": len(candidates),

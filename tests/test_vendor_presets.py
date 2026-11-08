@@ -201,7 +201,8 @@ def test_demo_vendor_arista_verdicts():
     assert stats["vendor"] == "arista"
     verdicts = {row["label"]: row["triage"]["verdict"]
                 for row in rows}
-    assert verdicts == {"KEV CVE-2026-7473": "CANNOT DETERMINE",
+    assert verdicts == {"KEV CVE-2026-7473":
+                        "CONDITION CHECK REQUIRED",
                         "CVE-2016-6894": "NOT AFFECTED"}
     assert all(row["status"] == "ok" for row in rows)
     assert all(not row["triage"].get("error") for row in rows)
@@ -282,7 +283,7 @@ def test_app_vendor_demo_arista_run_renders_both_fixtures():
     assert results is not None and len(results) == 2
     assert all(r["status"] == "ok" for r in results)
     assert {r["triage"]["verdict"] for r in results} == {
-        "CANNOT DETERMINE", "NOT AFFECTED"}
+        "CONDITION CHECK REQUIRED", "NOT AFFECTED"}
 
 
 def test_app_vendor_demo_nokia_notice():

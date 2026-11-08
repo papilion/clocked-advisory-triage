@@ -359,7 +359,9 @@ def test_run_batch_items_mock_verdicts_and_labels():
     assert results[0]["label"] == "CVE-FAKE-1"
     assert results[0]["triage"]["verdict"] == "AFFECTED"
     assert results[1]["url"] == ""
-    assert results[1]["triage"]["verdict"] == "CANNOT DETERMINE"
+    # Sample 7's conditional advisory: gated grade (bgp parity §3).
+    assert results[1]["triage"]["verdict"] == \
+        "CONDITION CHECK REQUIRED"
     assert progress_calls == [(0, 2, "CVE-FAKE-1"), (1, 2, "notes.txt")]
 
 

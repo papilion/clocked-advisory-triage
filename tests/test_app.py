@@ -242,7 +242,8 @@ def test_feeds_under_override_with_key_uses_fixtures():
                 if r.get("basis") == "local-screen"]
     assert len(kev_rows) == 1
     assert kev_rows[0]["triage"]["mode"] == "local"
-    assert kev_rows[0]["triage"]["verdict"] == "CANNOT DETERMINE"
+    assert kev_rows[0]["triage"]["verdict"] == \
+        "CONDITION CHECK REQUIRED"
 
 
 # --------- stale sample binding / stale mode results ---------------
@@ -324,3 +325,12 @@ def test_paste_credit_exhausted_shows_banner_korean():
               "없습니다. Demo 모드로 전환하면 번들 샘플 권고 7종(모든 "
               "판정 유형)을 API 호출 없이 체험할 수 있습니다.")
         for w in warnings), warnings
+
+
+def test_condition_grade_has_display_and_style():
+    import app as app_module
+    assert app_module.VERDICT_DISPLAY["en"][
+        "CONDITION CHECK REQUIRED"] == "CONDITION CHECK REQUIRED"
+    assert app_module.VERDICT_DISPLAY["ko"][
+        "CONDITION CHECK REQUIRED"] == "조건 확인 필요"
+    assert "CONDITION CHECK REQUIRED" in app_module.VERDICT_STYLE

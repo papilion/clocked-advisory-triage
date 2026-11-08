@@ -26,9 +26,11 @@ Robustness features in the matcher:
     explicit affected-version list does not decide a device.
   - Applicability conditions: when an advisory applies only under a
     stated condition (e.g. a feature configured a certain way), a
-    product+version match is gated to CANNOT DETERMINE - the
-    inventory cannot confirm the condition - with the condition
-    named in the reason, the warnings, and the checklist.
+    product+version match is gated to CONDITION CHECK REQUIRED -
+    the inventory cannot confirm the condition - with the condition
+    named in the reason, the warnings, and the checklist. The
+    grade asserts the confirmed match; CANNOT DETERMINE remains
+    for cases where nothing is confirmed.
 
 Mock Mode: when no CLOCKED_API_KEY is available, canned responses from
 mock_responses.json are used for the bundled samples and for the
@@ -57,6 +59,7 @@ ROOT = Path(__file__).resolve().parent
 VERDICT_AFFECTED = "AFFECTED"
 VERDICT_NOT_AFFECTED = "NOT AFFECTED"
 VERDICT_CANNOT = "CANNOT DETERMINE"
+VERDICT_CONDITION = "CONDITION CHECK REQUIRED"
 
 
 # --------------------------------------------------------------------------
@@ -98,6 +101,15 @@ REASON_STRINGS = {
             "Product matches, but version %s does not satisfy the "
             "version condition stated in the advisory."
         ),
+        "version_train_equal": (
+            "Version %s is in the %s train, which the advisory's "
+            "train-level bound %s covers."
+        ),
+        "version_suffix_equal": (
+            "Version %s matches the advisory's version %s: the "
+            "numeric parts are identical and only one side "
+            "carries a release suffix."
+        ),
         "condition_gate": (
             "Matches the affected product and version, but the "
             "advisory applies only when: %s - the inventory does "
@@ -125,6 +137,14 @@ REASON_STRINGS = {
         "version_constraint_not_satisfied": (
             "제품은 일치하지만 버전 %s은(는) 권고문에 명시된 버전 조건을 "
             "충족하지 않습니다."
+        ),
+        "version_train_equal": (
+            "버전 %s은(는) %s 트레인에 속하고, 권고문의 트레인 단위 "
+            "경계 %s이(가) 이 트레인을 포함합니다."
+        ),
+        "version_suffix_equal": (
+            "버전 %s은(는) 권고문의 버전 %s와 숫자가 동일하고 접미는 "
+            "한쪽에만 있어 같은 릴리스로 판정합니다."
         ),
         "condition_gate": (
             "영향받는 제품과 버전은 일치하지만, 이 권고문은 다음 조건에서만 "
@@ -254,20 +274,34 @@ def _norm_version_text(version_text):
     return re.sub(r"\s+", "", str(version_text or "")).strip().lower()
 
 
-def version_matches(device_version, affected_entry):
-    # type: (str, str) -> Optional[bool]
+def version_matches(device_version, affected_entry, eos_rules=False):
+    # type: (str, str, bool) -> Optional[bool]
     """Does device_version match one affected entry?
 
     Supports exact matches, wildcards (17.9.x), and hyphen ranges
     (17.9.1-17.9.5). Returns None when the comparison cannot be made
-    (unparseable device version).
+    (unparseable device version). With `eos_rules` (Arista EOS
+    context only, see _compare_versions_detail), the plain-exact
+    fallthrough also accepts an R1/R2 equality as a match; the
+    literal, wildcard, and hyphen paths never consult the flag.
     """
+    return version_matches_detail(
+        device_version, affected_entry, eos_rules=eos_rules)[0]
+
+
+def version_matches_detail(device_version, affected_entry,
+                           eos_rules=False):
+    # type: (str, str, bool) -> Tuple[Optional[bool], Optional[str]]
+    """version_matches plus the deciding comparison's flavour:
+    "train_equal" / "suffix_equal" when an R1/R2 equality made the
+    match, "unparseable" when no comparison was possible, else
+    None. The bool is exactly version_matches' result."""
     device_norm = _norm_version_text(device_version)
     entry_norm = _norm_version_text(affected_entry)
     if not device_norm or not entry_norm:
-        return None
+        return None, "unparseable"
     if device_norm == entry_norm:
-        return True
+        return True, None
 
     # Wildcard, e.g. 17.9.x
     if "x" in entry_norm.split("."):
@@ -281,8 +315,8 @@ def version_matches(device_version, affected_entry):
                 if device_parts[idx] != part:
                     ok = False
                     break
-            return ok
-        return False
+            return ok, None
+        return False, None
 
     # Hyphen range, e.g. 17.9.1-17.9.5
     if "-" in entry_norm and not entry_norm.startswith("-"):
@@ -291,18 +325,28 @@ def version_matches(device_version, affected_entry):
         high = parse_version(high_text)
         device_tuple = parse_version(device_version)
         if low is None or high is None or device_tuple is None:
-            return None
+            return None, "unparseable"
         width = max(len(low), len(high), len(device_tuple))
         padded_device = device_tuple + (0,) * (width - len(device_tuple))
         padded_low = low + (0,) * (width - len(low))
         padded_high = high + (0,) * (width - len(high))
-        return padded_low <= padded_device <= padded_high
+        return padded_low <= padded_device <= padded_high, None
 
     # Plain exact-style entry that did not match literally: only call it
     # a non-match when both sides are parseable versions.
     if parse_version(device_version) is None:
-        return None
-    return False
+        return None, "unparseable"
+    if eos_rules:
+        # EOS equality rules (R1/R2): an exact entry at train
+        # precision ("4.31") names the whole train, and an entry
+        # whose numeric parts equal the device's while the suffix
+        # is one-sided ("4.36.0" vs device "4.36.0F") names the
+        # same release.
+        compared, detail = _compare_versions_detail(
+            device_version, affected_entry, eos_rules=True)
+        if compared == 0:
+            return True, detail
+    return False, None
 
 
 # --------------------------------------------------------------------------
@@ -365,66 +409,137 @@ def _version_letters(version_text):
                    if ch.isalpha())
 
 
-def _compare_versions(device_text, bound_text):
-    # type: (str, str) -> Optional[int]
-    """Compare two versions numerically: -1, 0, or 1.
+def _is_train_precision(text, parsed):
+    # type: (str, Optional[Tuple[int, ...]]) -> bool
+    """Train-precision version text: exactly two numeric components
+    and no letter suffix ("4.31"). Arista CNA publishes bounds at
+    this precision for whole release trains."""
+    return parsed is not None and len(parsed) == 2 \
+        and _version_letters(text) == ""
 
-    Returns None when either side is unparseable, or when the numeric
-    tuples are EQUAL but the letter signatures differ (e.g. device
-    4.30.5F vs bound 4.30.5M): suffix ordering is vendor-specific, so
-    that case is unknown and must never be guessed.
+
+def _compare_versions_detail(device_text, bound_text, eos_rules=False):
+    # type: (str, str, bool) -> Tuple[Optional[int], Optional[str]]
+    """Compare two versions numerically: (-1|0|1, detail).
+
+    The int is None when either side is unparseable, or when the
+    numeric tuples tie but the letter signatures differ on BOTH
+    sides (e.g. device 4.30.5F vs bound 4.30.5M): suffix ordering
+    is vendor-specific, so that case is unknown and must never be
+    guessed. The detail names why an int is None or an equality
+    holds: "unparseable", "suffix_mismatch", "train_equal" (R1),
+    "suffix_equal" (R2), else None.
+
+    The EOS equality rules apply only with eos_rules=True (the
+    caller asserts Arista EOS context; see DESIGN-BGP-PARITY §1.2):
+    - R1: one side is train precision ("4.31") and the other
+      side's tuple starts with those two components -> equal.
+      A train-precision bound names the whole train, so a patch
+      release of that train is neither above nor below it.
+    - R2: numeric tie, letter signatures differ, and exactly one
+      side has no letters -> equal ("4.36.0" == "4.36.0F").
+    With eos_rules=False the result is exactly the historical
+    _compare_versions behaviour on every input.
     """
     device_tuple = parse_version(device_text)
     bound_tuple = parse_version(bound_text)
     if device_tuple is None or bound_tuple is None:
-        return None
+        return None, "unparseable"
     width = max(len(device_tuple), len(bound_tuple))
     padded_device = device_tuple + (0,) * (width - len(device_tuple))
     padded_bound = bound_tuple + (0,) * (width - len(bound_tuple))
-    if padded_device < padded_bound:
-        return -1
-    if padded_device > padded_bound:
-        return 1
-    if _version_letters(device_text) != _version_letters(bound_text):
-        return None
-    return 0
+    if padded_device != padded_bound:
+        if eos_rules:
+            if _is_train_precision(device_text, device_tuple) \
+                    and len(bound_tuple) > 2 \
+                    and bound_tuple[:2] == device_tuple:
+                return 0, "train_equal"
+            if _is_train_precision(bound_text, bound_tuple) \
+                    and len(device_tuple) > 2 \
+                    and device_tuple[:2] == bound_tuple:
+                return 0, "train_equal"
+        return (-1 if padded_device < padded_bound else 1), None
+    device_letters = _version_letters(device_text)
+    bound_letters = _version_letters(bound_text)
+    if device_letters == bound_letters:
+        return 0, None
+    if eos_rules and (not device_letters or not bound_letters):
+        return 0, "suffix_equal"
+    return None, "suffix_mismatch"
 
 
-def constraint_matches(device_version, constraint):
-    # type: (str, Dict[str, Any]) -> Optional[bool]
+def _compare_versions(device_text, bound_text, eos_rules=False):
+    # type: (str, str, bool) -> Optional[int]
+    """Compare two versions numerically: -1, 0, or 1.
+
+    Returns None when either side is unparseable, or when the
+    numeric tuples are EQUAL but the letter signatures differ
+    (e.g. device 4.30.5F vs bound 4.30.5M): suffix ordering is
+    vendor-specific, so that case is unknown and must never be
+    guessed. With eos_rules=True the Arista EOS equality rules
+    R1/R2 apply (see _compare_versions_detail).
+    """
+    return _compare_versions_detail(
+        device_text, bound_text, eos_rules=eos_rules)[0]
+
+
+def constraint_matches(device_version, constraint, eos_rules=False):
+    # type: (str, Dict[str, Any], bool) -> Optional[bool]
     """Evaluate one structured constraint against a device version.
 
     before:       device < bound
     up_to:        device <= bound
     train_before: device major.minor digits == train digits AND
                   device < bound
-    Returns None when the comparison cannot be made.
+    Returns None when the comparison cannot be made. `eos_rules`
+    is threaded into the bound comparison only (the train_before
+    membership test is already a prefix test).
     """
+    return constraint_matches_detail(
+        device_version, constraint, eos_rules=eos_rules)[0]
+
+
+def constraint_matches_detail(device_version, constraint,
+                              eos_rules=False):
+    # type: (str, Dict[str, Any], bool) -> Tuple[Optional[bool], Optional[str]]
+    """constraint_matches plus the deciding comparison's flavour:
+    when the constraint is satisfied BY an R1/R2 equality (only
+    possible for up_to, the inclusive relation), the detail is
+    "train_equal" / "suffix_equal"; when the comparison cannot be
+    made, the detail is "suffix_mismatch" / "unparseable"; else
+    None. The bool is exactly constraint_matches' result."""
     if not isinstance(constraint, dict):
-        return None
+        return None, None
     relation = constraint.get("relation")
     bound = constraint.get("version")
     if not bound:
-        return None
+        return None, None
     if relation == "train_before":
         train_tuple = parse_version(constraint.get("train"))
         device_tuple = parse_version(device_version)
         if train_tuple is None or device_tuple is None:
-            return None
+            return None, "unparseable"
         if device_tuple[:len(train_tuple)] != train_tuple:
-            return False
-        compared = _compare_versions(device_version, bound)
+            return False, None
+        compared, detail = _compare_versions_detail(
+            device_version, bound, eos_rules=eos_rules)
         if compared is None:
-            return None
-        return compared < 0
-    compared = _compare_versions(device_version, bound)
+            return None, detail
+        return compared < 0, None
+    if relation not in ("before", "up_to"):
+        return None, None
+    compared, detail = _compare_versions_detail(
+        device_version, bound, eos_rules=eos_rules)
     if compared is None:
-        return None
+        return None, detail
     if relation == "before":
-        return compared < 0
-    if relation == "up_to":
-        return compared <= 0
-    return None
+        result = compared < 0
+    else:
+        result = compared <= 0
+    if result and compared == 0 \
+            and detail in ("train_equal", "suffix_equal"):
+        return True, detail
+    return result, None
 
 
 # --------------------------------------------------------------------------
@@ -650,13 +765,36 @@ def product_matches(device_model, products):
     return False
 
 
+# Standalone "eos" token (word boundaries, the same style as
+# batch's _TEXT_PRODUCT_PHRASES): the single/paste flow's EOS
+# context signal for the R1/R2 equality rules. A substring match
+# would leak EOS semantics into unrelated words, so the token
+# must stand alone.
+_EOS_TOKEN_RE = re.compile(r"(?<![a-z0-9])eos(?![a-z0-9])",
+                           re.IGNORECASE)
+
+
+def _eos_context(extracted, products, affected_versions):
+    # type: (Dict[str, Any], List[Any], List[Any]) -> bool
+    """True when the extracted fields assert Arista EOS context:
+    a standalone "eos" token in the vendor, any product, or any
+    affected-version entry. Only then may the matcher apply the
+    EOS equality rules (R1/R2) - Junos/Cisco paths never see
+    the token and keep the generic comparison."""
+    texts = [str(extracted.get("vendor") or "")]
+    texts.extend(str(p) for p in products or [])
+    texts.extend(str(v) for v in affected_versions or [])
+    return any(_EOS_TOKEN_RE.search(text) for text in texts)
+
+
 def _row(hostname, model, version, candidate, status, reason,
-         condition_gated=False):
-    # type: (str, str, str, bool, str, str, bool) -> Dict[str, Any]
+         condition_gated=False, reason_code=None):
+    # type: (str, str, str, bool, str, str, bool, Optional[str]) -> Dict[str, Any]
     return {
         "hostname": hostname, "model": model, "version": version,
         "candidate": candidate, "status": status, "reason": reason,
         "condition_gated": condition_gated,
+        "reason_code": reason_code,
     }
 
 
@@ -670,6 +808,53 @@ def _constraint_reason(reasons, constraint, version):
     if relation == "up_to":
         return reasons["version_constraint_up_to"] % (version, bound)
     return reasons["version_constraint_before"] % (version, bound)
+
+
+def _equality_reason_code(detail):
+    # type: (Optional[str]) -> str
+    """Reason code for a confirmed version match: the R1/R2
+    equality codes when an EOS equality rule decided it, else the
+    plain in-range code."""
+    if detail == "train_equal":
+        return "VERSION_TRAIN_EQUAL"
+    if detail == "suffix_equal":
+        return "VERSION_SUFFIX_EQUAL"
+    return "VERSION_IN_RANGE"
+
+
+def _inconclusive_reason_code(details):
+    # type: (List[Optional[str]]) -> str
+    """Reason code for an inconclusive comparison, from the
+    flavours of its undecidable comparisons: a both-suffix tie
+    outranks an unparseable version, which outranks the generic
+    inconclusive (design §2.3 precedence)."""
+    if "suffix_mismatch" in details:
+        return "VERSION_SUFFIX_MISMATCH"
+    if "unparseable" in details:
+        return "VERSION_UNPARSEABLE"
+    return "VERSION_INCONCLUSIVE"
+
+
+def _constraint_equality_reason(reasons, detail, constraint,
+                                version):
+    # type: (Dict[str, str], str, Dict[str, Any], str) -> str
+    """Reason sentence when an EOS equality rule (R1/R2) is what
+    satisfied the constraint: the version was not merely inside a
+    numeric range - it is the bound's own train (R1) or the same
+    release apart from a one-sided suffix (R2). Slots are
+    version / train / bound only."""
+    bound = constraint.get("version")
+    if detail == "train_equal":
+        train = constraint.get("train")
+        if not train:
+            bound_tuple = parse_version(bound)
+            if bound_tuple:
+                train = ".".join(str(n) for n in bound_tuple[:2])
+            else:
+                train = str(bound)
+        return reasons["version_train_equal"] % (version, train,
+                                                 bound)
+    return reasons["version_suffix_equal"] % (version, bound)
 
 
 def match_device(device, extracted, lang="en"):
@@ -698,7 +883,7 @@ def match_device(device, extracted, lang="en"):
       Items with prose wording are never reduced to a token.
     - Applicability conditions gate AFFECTED: a device that matches
       product and version but whose advisory carries conditions the
-      inventory cannot confirm becomes CANNOT DETERMINE
+      inventory cannot confirm becomes CONDITION CHECK REQUIRED
       (condition_gated=True), never AFFECTED.
 
     `lang` localizes only the human-readable reason string; the
@@ -713,6 +898,8 @@ def match_device(device, extracted, lang="en"):
         affected_versions = [affected_versions]
     constraints = _structured_constraints(extracted)
     conditions = _structured_conditions(extracted)
+    eos_context = _eos_context(extracted, products,
+                               affected_versions)
 
     hostname = device.get("hostname", "")
     model = device.get("model", "")
@@ -720,25 +907,31 @@ def match_device(device, extracted, lang="en"):
 
     if not products:
         return _row(hostname, model, version, False, VERDICT_CANNOT,
-                    reasons["no_product"])
+                    reasons["no_product"],
+                    reason_code="PRODUCT_NOT_EXTRACTED")
 
     if not product_matches(model, products):
         return _row(hostname, model, version, False,
-                    VERDICT_NOT_AFFECTED, reasons["different_product"])
+                    VERDICT_NOT_AFFECTED, reasons["different_product"],
+                    reason_code="PRODUCT_MISMATCH")
 
     # Product matches from here on: this device is a candidate.
     if not affected_versions and not constraints:
         return _row(hostname, model, version, True, VERDICT_CANNOT,
-                    reasons["no_affected_versions"])
+                    reasons["no_affected_versions"],
+                    reason_code="NO_VERSION_EVIDENCE")
 
     if parse_version(version) is None:
         return _row(hostname, model, version, True, VERDICT_CANNOT,
-                    reasons["unparseable_version"] % version)
+                    reasons["unparseable_version"] % version,
+                    reason_code="VERSION_UNPARSEABLE")
 
     status = None  # type: Optional[str]
     reason = None  # type: Optional[str]
+    reason_code = None  # type: Optional[str]
 
     saw_unknown = False
+    saw_unknown_details = []  # type: List[Optional[str]]
     decidable_entries = []  # type: List[Any]
     for entry in affected_versions:
         if _is_decidable_list_entry(entry):
@@ -757,55 +950,83 @@ def match_device(device, extracted, lang="en"):
             # would manufacture a false NOT AFFECTED. The derived
             # constraints below speak for these entries instead.
             saw_unknown = True
+    matched_detail = None  # type: Optional[str]
     for entry in decidable_entries:
-        result = version_matches(version, str(entry))
+        result, detail = version_matches_detail(
+            version, str(entry), eos_rules=eos_context)
         if result is True:
             status = VERDICT_AFFECTED
             reason = reasons["version_affected"] % (version, entry)
+            matched_detail = detail
+            reason_code = _equality_reason_code(detail)
             break
         if result is None:
             saw_unknown = True
+            saw_unknown_details.append(detail)
     if status is None and decidable_entries and not saw_unknown:
         # Every decidable list entry was compared and none matched:
         # the list decided. Constraints must not override a decided
         # list.
         status = VERDICT_NOT_AFFECTED
         reason = reasons["version_not_affected"] % version
+        reason_code = "VERSION_OUT_OF_RANGE"
 
     if status is None and constraints:
         # The list did not decide (inconclusive entry, or empty):
         # fall back to the normalized prose constraints.
-        outcomes = [(constraint_matches(version, c), c)
-                    for c in constraints]
-        matched = [c for outcome, c in outcomes if outcome is True]
+        outcomes = [(constraint_matches_detail(
+            version, c, eos_rules=eos_context), c)
+            for c in constraints]
+        matched = [(detail, c) for (outcome, detail), c in outcomes
+                   if outcome is True]
         if matched:
             status = VERDICT_AFFECTED
-            reason = _constraint_reason(reasons, matched[0], version)
-        elif any(outcome is None for outcome, _c in outcomes):
+            matched_detail, matched_constraint = matched[0]
+            reason_code = _equality_reason_code(matched_detail)
+            if matched_detail in ("train_equal", "suffix_equal"):
+                reason = _constraint_equality_reason(
+                    reasons, matched_detail, matched_constraint,
+                    version)
+            else:
+                reason = _constraint_reason(
+                    reasons, matched_constraint, version)
+        elif any(outcome is None for (outcome, _detail), _c
+                 in outcomes):
             status = VERDICT_CANNOT
             reason = reasons["version_inconclusive"]
+            none_details = [detail for (outcome, detail), _c
+                            in outcomes if outcome is None]
+            reason_code = _inconclusive_reason_code(none_details)
         else:
             status = VERDICT_NOT_AFFECTED
             reason = reasons["version_constraint_not_satisfied"] % version
+            reason_code = "VERSION_OUT_OF_RANGE"
 
     if status is None:
         if saw_unknown:
             status = VERDICT_CANNOT
             reason = reasons["version_inconclusive"]
+            reason_code = _inconclusive_reason_code(
+                saw_unknown_details)
         else:
             status = VERDICT_CANNOT
             reason = reasons["no_affected_versions"]
+            reason_code = "NO_VERSION_EVIDENCE"
 
     if status == VERDICT_AFFECTED and conditions:
         # Applicability gate: matching product and version is not
         # enough when the advisory only applies under conditions the
-        # inventory does not speak to (Arista 0201 pattern).
+        # inventory does not speak to (Arista 0201 pattern). The
+        # match itself is confirmed, so the row takes the dedicated
+        # CONDITION CHECK REQUIRED grade, not CANNOT DETERMINE.
         condition_text = "; ".join(c["text"] for c in conditions)
-        return _row(hostname, model, version, True, VERDICT_CANNOT,
+        return _row(hostname, model, version, True, VERDICT_CONDITION,
                     reasons["condition_gate"] % condition_text,
-                    condition_gated=True)
+                    condition_gated=True,
+                    reason_code="CONDITION_UNVERIFIED")
 
-    return _row(hostname, model, version, True, status, reason or "")
+    return _row(hostname, model, version, True, status, reason or "",
+                reason_code=reason_code)
 
 
 def match_inventory(devices, extracted, lang="en"):
@@ -815,8 +1036,16 @@ def match_inventory(devices, extracted, lang="en"):
 
 def base_verdict(device_results):
     # type: (List[Dict[str, Any]]) -> str
+    # Precedence: AFFECTED > CONDITION CHECK REQUIRED > CANNOT
+    # DETERMINE > NOT AFFECTED. A confirmed match with a named
+    # check (a gated candidate row) outranks an undecided second
+    # device as the headline (design ambiguity rule A-1); the
+    # undecided device stays visible per-device with its own code.
     if any(r.get("status") == VERDICT_AFFECTED for r in device_results):
         return VERDICT_AFFECTED
+    if any(r.get("status") == VERDICT_CONDITION and r.get("candidate")
+           for r in device_results):
+        return VERDICT_CONDITION
     if any(r.get("status") == VERDICT_CANNOT and r.get("candidate")
            for r in device_results):
         return VERDICT_CANNOT
@@ -1210,11 +1439,53 @@ def parse_grounding(grounding_result):
 # Verdict composition (pure, testable offline)
 # --------------------------------------------------------------------------
 
+# Entry-level uncertainty codes by precedence (design §2.3): for a
+# row-composed CANNOT DETERMINE, the headline code is the most
+# specific uncertainty among the candidate rows.
+_UNCERTAINTY_CODE_ORDER = (
+    "VERSION_SUFFIX_MISMATCH", "VERSION_UNPARSEABLE",
+    "RANGE_PARTIAL", "PRODUCT_UNMAPPED", "NO_VERSION_EVIDENCE",
+    "VERSION_INCONCLUSIVE", "PRODUCT_NOT_EXTRACTED",
+)
+
+
+def _composed_reason_code(device_results, verdict):
+    # type: (List[Dict[str, Any]], str) -> Optional[str]
+    """The entry-level reason code for a base (pre-downgrade)
+    verdict, inherited from the deciding device row: AFFECTED
+    takes its first affected row's code, CONDITION is always the
+    unverified-condition code, NOT AFFECTED the out-of-range
+    code, and a row-composed CANNOT takes the highest-precedence
+    uncertainty code among candidate rows (falling back to any
+    row, then the generic inconclusive code). Codes are derived
+    from which local rule fired - never from model output."""
+    if verdict == VERDICT_CONDITION:
+        return "CONDITION_UNVERIFIED"
+    if verdict == VERDICT_NOT_AFFECTED:
+        return "VERSION_OUT_OF_RANGE"
+    if verdict == VERDICT_AFFECTED:
+        for row in device_results:
+            if row.get("status") == VERDICT_AFFECTED:
+                return row.get("reason_code") or "VERSION_IN_RANGE"
+        return "VERSION_IN_RANGE"
+    candidate_codes = [row.get("reason_code") for row in device_results
+                       if row.get("candidate")]
+    for wanted in _UNCERTAINTY_CODE_ORDER:
+        if wanted in candidate_codes:
+            return wanted
+    all_codes = [row.get("reason_code") for row in device_results]
+    for wanted in _UNCERTAINTY_CODE_ORDER:
+        if wanted in all_codes:
+            return wanted
+    return "VERSION_INCONCLUSIVE"
+
+
 def compose_verdict(device_results, decide_parsed, grounding_parsed,
                     lang="en", conditions=None):
     # type: (List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, Optional[List[str]]) -> Dict[str, Any]
     warnings_text = WARNING_STRINGS[_normalize_lang(lang)]
     verdict = base_verdict(device_results)
+    reason_code = _composed_reason_code(device_results, verdict)
     warnings = []  # type: List[str]
     urgency = str(decide_parsed.get("urgency") or "monitor")
 
@@ -1235,6 +1506,7 @@ def compose_verdict(device_results, decide_parsed, grounding_parsed,
         low_sufficiency = True
     if low_sufficiency:
         verdict = VERDICT_CANNOT
+        reason_code = "EVIDENCE_INSUFFICIENT"
         warnings.append(
             warnings_text["low_sufficiency"] % (
                 "unknown" if evidence_prob is None
@@ -1243,13 +1515,15 @@ def compose_verdict(device_results, decide_parsed, grounding_parsed,
 
     if not grounding_parsed.get("supported"):
         verdict = VERDICT_CANNOT
+        reason_code = "GROUNDING_UNVERIFIED"
         warnings.append(
             warnings_text["grounding"] % (
                 grounding_parsed.get("verdict"),
                 grounding_parsed.get("answers_question"))
         )
 
-    return {"verdict": verdict, "urgency": urgency, "warnings": warnings}
+    return {"verdict": verdict, "urgency": urgency,
+            "warnings": warnings, "reason_code": reason_code}
 
 
 def _products_text(extracted):
@@ -1274,10 +1548,12 @@ def build_claim(verdict, device_results, extracted):
         products = _products_text(extracted) or "the named products"
         return ("No device in the inventory is affected: the advisory covers %s, "
                 "and no inventoried device runs an affected version." % products)
-    if verdict == VERDICT_CANNOT:
+    if verdict in (VERDICT_CONDITION, VERDICT_CANNOT):
         # Condition-gated case: state BOTH the product/version match
         # and the unconfirmed condition, so Verify can check the
-        # claim against the advisory + inventory documents.
+        # claim against the advisory + inventory documents. The
+        # text is true under the CONDITION grade and under a
+        # downgraded CANNOT alike, so both reach it.
         conditions = _structured_conditions(extracted)
         gated = [r for r in device_results if r.get("condition_gated")]
         if conditions and gated:
@@ -1409,9 +1685,10 @@ def generate_checklist(verdict, urgency, lang="en", conditions=None):
         return list(checklists["not_affected"])
     items = list(checklists["cannot_determine"])
     if conditions:
-        # Condition-gated cannot-determine: the fastest path to a
-        # firm verdict is verifying each condition, so those steps
-        # go first.
+        # Condition-gated results (verdict CONDITION CHECK REQUIRED,
+        # or a downgrade of one to CANNOT DETERMINE) land here too:
+        # the fastest path to a firm verdict is verifying each
+        # condition, so those steps go first.
         return _condition_check_steps(conditions, lang) + items
     return items
 
@@ -1810,6 +2087,7 @@ def _live_result(key, advisory_text, inventory_text, devices, lang):
         "grounding": grounding_parsed,
         "device_results": device_results,
         "verdict": final_verdict,
+        "reason_code": composed["reason_code"],
         "urgency": composed["urgency"],
         "warnings": composed["warnings"],
         "conditions": condition_texts,
@@ -1918,6 +2196,7 @@ def run_triage(advisory_text, inventory_text, sample_id=None, api_key=None,
         "grounding": grounding_parsed,
         "device_results": device_results,
         "verdict": final_verdict,
+        "reason_code": composed["reason_code"],
         "urgency": composed["urgency"],
         "warnings": composed["warnings"],
         "conditions": condition_texts,

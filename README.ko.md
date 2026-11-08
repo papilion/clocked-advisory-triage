@@ -5,7 +5,8 @@ English: [README.md](README.md)
 **권고 링크 목록**과 **장비 인벤토리(CSV 업로드)**를 주면, 권고를
 직접 가져와 권고마다 **근거를 숨기지 않고 제시하는 단 하나의 방어
 가능한 판정** — **AFFECTED(해당 있음)**, **NOT AFFECTED(해당
-없음)**, **CANNOT DETERMINE(판정 불가)** — 을 돌려줍니다. (권고
+없음)**, **CONDITION CHECK REQUIRED(조건 확인 필요)**,
+**CANNOT DETERMINE(판정 불가)** — 을 돌려줍니다. (권고
 하나를 직접 붙여넣는 방식도 두 번째 입력 모드로 계속 제공됩니다.)
 
 이 도구는 **Clocked Build Challenge**를 위해 네트워크 운영자가,
@@ -13,9 +14,11 @@ English: [README.md](README.md)
 한정되지 않고 플릿 전체를 대상으로 합니다. 업로드한 인벤토리에
 있는 것은 무엇이든 범위 안에 들어갑니다 — 네트워크 장비, 보안
 장비(방화벽 / IPS / WAF / DDoS), 로드 밸런서와 ADC, 그리고
-서버까지. 정직한 세 번째 판정이 이 도구의 핵심입니다. 권고가
+서버까지. 정직한 판정이 이 도구의 핵심입니다. 권고가
 영향받는 버전을 명시하지 않으면, "해당 없음"이라고 추측하는 대신
-그렇다고 말합니다.
+그렇다고 말하고, 제품+버전 일치가 인벤토리로 확인할 수 없는
+조건 아래에서만 성립하면, "판정 불가"에 묻지 않고 CONDITION
+CHECK REQUIRED라고 말합니다.
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/papilion/clocked-advisory-triage)
 
@@ -206,15 +209,21 @@ GitHub Codespaces** 배지를 클릭하세요:
    - host, model, version 중 하나라도 빠진 행은 건너뛰고 그 수를
      세며, 실행 전에 파싱된 첫 장비들이 미리보기로 표시됩니다.
 4. **결과** — 먼저 **조치 요약(Action summary)**(조치가 필요한
-   권고만, AFFECTED를 CANNOT DETERMINE 앞에, 각각 링크와 함께 한
+   권고만, AFFECTED 먼저, 이어서 CONDITION CHECK REQUIRED와
+   CANNOT DETERMINE 순서로, 각각 링크와 함께 한
    줄씩), 이어서 요약 표(권고별 판정, 긴급도, 영향 장비 수, 조건
    플래그; 건너뛴 항목과 가져오기 실패 항목도 각각의 행으로
    표시), 그리고 권고마다 펼칠 수 있는 상세가 하나씩. 모든 상세
    — 배치와 단일 모드 모두 — 에는 결정적인 **Action required**
    블록이 들어갑니다: AFFECTED이면 영향받는 호스트명, 업그레이드할
    수정 버전, 마감일, 권고가 명시한 우회 조치(적용 조건과 같은
-   집중 Extract 패스로 추출); CANNOT DETERMINE이면 확인할 정확한
-   조건; NOT AFFECTED이면 "No action required."
+   집중 Extract 패스로 추출); CONDITION CHECK REQUIRED와
+   CANNOT DETERMINE이면 확인할 정확한
+   조건; NOT AFFECTED이면 "No action required." 모든 판정 —
+   항목 판정과 장비별 행 판정 모두 — 에는 그 판정을 만든 로컬
+   규칙을 정확히 지목하는 결정적 **사유 코드**(예:
+   `VERSION_TRAIN_EQUAL`, `KEV_NO_VERSION_RANGE`,
+   `CONDITION_UNVERIFIED`)가 함께 붙어 상세 보기에 표시됩니다.
 
 배치가 폭주하지 않도록 하는 상한: 링크 목록 실행당 최대 **10개**
 링크(초과분은 건너뜀으로 보고), 목록당 수집 링크 **15**개,
@@ -282,7 +291,7 @@ range · *b* not in fleet · *c* deep-triaged"). 로컬 판정은 모델이
 - **KEV 등재는 우선순위일 뿐 판정이 아닙니다.** KEV 카탈로그는
   버전 범위를 공개하지 않으므로, 제품은 장비군과 일치하지만
   NVD·KEV·추적한 제조사 원문 어디에도 영향 버전이 명시되지 않은
-  KEV 항목은 로컬 **CANNOT DETERMINE** 행이 됩니다("KEV 조건
+  KEV 항목은 로컬 **CONDITION CHECK REQUIRED** 행이 됩니다("KEV 조건
   확인 필요: KEV 등재 제품이 이 장비와 일치합니다. 설치 버전이
   영향받지 않는지 확인하세요(KEV에는 버전 범위가 없습니다)") —
   KEV 조치 기한, 필수 조치, 랜섬웨어 플래그를 체크리스트로
@@ -359,13 +368,20 @@ Inventory ──────► Local deterministic ◄───┘
    4.30.5M", "Junos OS 21.2R1"), 그런 항목은 버전 토큰으로
    판정하고, 서술형 표현은 절대 토큰으로 축소하지 않습니다. 명시적
    버전 목록으로 장비가 결정되지 않으면 정규화된 제약을 수치로
-   평가합니다; 수치 비교가 진짜로 결정 불가능하면(예: EOS
+   평가합니다. Arista EOS에는 두 가지 동등성 규칙이 적용됩니다
+   (운영 중인 권고 엔진에서 이식): 트레인 정밀도로 명시된 포함
+   경계(`4.31`)는 그 트레인 전체(`4.31.1F`)를 포함하고, 수치
+   부분이 장비와 같고 접미사가 한쪽에만 있는 경계(`4.36.0` 대
+   `4.36.0F`)는 같은 릴리스를 가리킵니다. 둘 다 순서가 아닌
+   동등성입니다: 수치 비교가 진짜로 결정 불가능하면(예: EOS
    `4.30.5F` 대 `4.30.5M` — 접미사 순서는 벤더마다 다릅니다)
    결과는 추측이 아닌 **CANNOT DETERMINE**입니다. 버전을 파싱할
    수 없는 후보 장비, 또는 영향 버전이 명시되지 않은 제품 일치도
    마찬가지로 **CANNOT DETERMINE**입니다 — 조용히 "해당 없음"이
    되지 않습니다. 그리고 권고에 적용 조건이 있으면, 제품+버전
-   일치는 CANNOT DETERMINE으로 **게이트**됩니다: 인벤토리에는
+   일치는 CONDITION CHECK REQUIRED로 **게이트**됩니다 — 일치
+   자체는 확정됐고 조건만 열려 있는 별도 등급입니다:
+   인벤토리에는
    조건에 대한 정보가 없으므로, UI는 "Applicability conditions
    to verify" 아래에 조건을 명시하고, 조건 확인 경고를 추가하며,
    구체적인 확인 절차를 체크리스트 맨 위에 둡니다.
@@ -412,7 +428,7 @@ ID, 지어낸 호스트명, 실제 IP 없음, 실제 벤더 텍스트 없음.
 | Sample 4 | Arista 스타일: Arista 7050SX3, EOS 4.30.4M/4.30.5M 영향, High, 수정 버전 + 마감일 | **AFFECTED** (DC-SW-01이 4.30.5M 실행 중; DC-SW-02는 7050CX3 — 다른 제품이라 해당 없음) |
 | Sample 5 | Juniper 스타일: QFX5110, Junos OS 21.2R1–21.2R3 영향, High, 수정 버전 + 마감일 | **AFFECTED** (AGG-RTR-01이 21.2R3 실행 중) |
 | Sample 6 | Juniper 스타일: MX480, 영향 버전이 서술로만 명시 — "Junos OS versions **prior to 21.4R2**", 수정 21.4R2, High | **AFFECTED** (CORE-RTR-01이 21.3R3 실행 중, 로컬로 도출한 `before:21.4R2` 제약으로 판정) |
-| Sample 7 | Arista 스타일: Arista 7050SX3, EOS 4.30.5M 영향, 단 **TerminAttr가 CloudVision(CVP)과 통신하도록 구성됐을 때만** | **CANNOT DETERMINE** (DC-SW-01은 제품 + 버전이 일치하지만, 인벤토리로는 TerminAttr 조건을 확인할 수 없음) |
+| Sample 7 | Arista 스타일: Arista 7050SX3, EOS 4.30.5M 영향, 단 **TerminAttr가 CloudVision(CVP)과 통신하도록 구성됐을 때만** | **CONDITION CHECK REQUIRED** (DC-SW-01은 제품 + 버전이 일치하지만, 인벤토리로는 TerminAttr 조건을 확인할 수 없음) |
 
 세 벤더 — Cisco, Juniper, Arista — 모두 **AFFECTED** 데모
 케이스가 있습니다(샘플 1, 5, 4). 샘플 2와 5는 둘 다 Juniper
@@ -488,7 +504,7 @@ fetcher를 주입한 배치 러너(가져오기 실패 하나가 배치를 중�
 - **적용 조건은 표면화만 하고 해소하지는 않습니다.** 인벤토리
   형식은 모델과 OS 버전만 담으므로, "TerminAttr configured for
   CVP" 같은 조건은 그것만으로 확인할 수 없습니다; 도구는 판정을
-  CANNOT DETERMINE으로 게이트하고 장비에서 정확히 무엇을
+  CONDITION CHECK REQUIRED로 게이트하고 장비에서 정확히 무엇을
   확인해야 하는지 알려줍니다. 구성 인벤토리를 제공하면 그런
   판정도 해소될 수 있을 것입니다.
 - **배치 가져오기는 최선 노력(best-effort)입니다.** 배치 모드는

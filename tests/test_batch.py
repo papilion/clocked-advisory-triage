@@ -18,6 +18,7 @@ import batch  # noqa: E402
 from batch import (  # noqa: E402
     MAX_LINKS,
     FetchError,
+    _entry_verdict_rank,
     fetch_advisory_text,
     html_to_text,
     parse_inventory_csv,
@@ -265,8 +266,10 @@ def test_run_batch_mock_verdicts_and_failure_isolation():
     assert results[1]["error"] == "HTTP 404"
     assert results[0]["triage"]["verdict"] == "AFFECTED"
     assert results[2]["triage"]["verdict"] == "AFFECTED"
-    assert results[3]["triage"]["verdict"] == "CANNOT DETERMINE"
-    # The conditional sample's gate surfaces through the batch too.
+    # The conditional sample's gate surfaces through the batch
+    # too, with its own grade (bgp parity §3).
+    assert results[3]["triage"]["verdict"] == \
+        "CONDITION CHECK REQUIRED"
     assert results[3]["triage"]["conditions"]
     assert len(progress_calls) == 4
     assert progress_calls[0] == (0, 4)
@@ -546,3 +549,16 @@ def test_batch_mode_korean_renders():
     _click_button(at, "샘플 링크 목록 불러오기")
     assert len([ln for ln in at.text_area[0].value.splitlines()
                 if ln.strip()]) == 7
+
+
+def test_entry_verdict_rank_orders_four_grades():
+    # Feed row order: AFFECTED > CONDITION CHECK REQUIRED >
+    # CANNOT DETERMINE > NOT AFFECTED (bgp parity §3).
+    def _item(verdict):
+        return {"triage": {"verdict": verdict}}
+
+    assert _entry_verdict_rank(_item("AFFECTED")) == 0
+    assert _entry_verdict_rank(
+        _item("CONDITION CHECK REQUIRED")) == 1
+    assert _entry_verdict_rank(_item("CANNOT DETERMINE")) == 2
+    assert _entry_verdict_rank(_item("NOT AFFECTED")) == 3

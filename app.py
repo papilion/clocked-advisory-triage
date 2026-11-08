@@ -9,6 +9,7 @@ from triage.py and are mapped to display text here.
 Python 3.9 compatible.
 """
 
+import contextlib
 import os
 import re
 import traceback
@@ -54,6 +55,7 @@ VERDICT_STYLE = {
     "AFFECTED": ("#b00020", "white"),
     "NOT AFFECTED": ("#4a5568", "white"),
     "CANNOT DETERMINE": ("#b7791f", "white"),
+    "CONDITION CHECK REQUIRED": ("#dd6b20", "white"),
 }
 
 FIELD_ORDER = ("vendor", "products", "affected_versions",
@@ -95,7 +97,8 @@ STRINGS = {
             "Bring a list of advisory links and your device inventory "
             "as CSV - or paste a single advisory. For each advisory you "
             "get one defensible verdict: **AFFECTED**, **NOT AFFECTED**, "
-            "or **CANNOT DETERMINE** - with the evidence shown, not hidden."
+            "**CONDITION CHECK REQUIRED**, or **CANNOT DETERMINE** - "
+            "with the evidence shown, not hidden."
         ),
         "mode_live": "Mode: LIVE - Clocked API key configured.",
         "mode_mock": (
@@ -138,6 +141,7 @@ STRINGS = {
         "verdict_heading": "Verdict",
         "empty_hint": "Load a sample (or paste an advisory) and click Run Triage.",
         "verdict_card_label": "VERDICT",
+        "reason_code_label": "Reason code",
         "urgency_label": "Urgency",
         "verify_label": "Verify (grounding)",
         "verified": "verified",
@@ -410,8 +414,8 @@ STRINGS = {
         "pitch": (
             "권고문 링크 목록과 장비 인벤토리 CSV를 가져오세요 — 단일 "
             "권고문 붙여넣기도 됩니다. 권고문별로 근거가 함께 제시되는 "
-            "판정 하나 — **해당 있음**, **해당 없음**, 또는 **판정 불가** "
-            "— 를 받을 수 있습니다."
+            "판정 하나 — **해당 있음**, **해당 없음**, **조건 확인 필요**, "
+            "또는 **판정 불가** — 를 받을 수 있습니다."
         ),
         "mode_live": "모드: 실시간(LIVE) - Clocked API 키가 설정되어 있습니다.",
         "mode_mock": (
@@ -454,6 +458,7 @@ STRINGS = {
         "verdict_heading": "판정",
         "empty_hint": "샘플을 불러오거나 권고문을 붙여넣은 뒤 '판정 실행'을 클릭하세요.",
         "verdict_card_label": "판정",
+        "reason_code_label": "판정 사유 코드",
         "urgency_label": "긴급도",
         "verify_label": "Verify (grounding)",
         "verified": "검증됨",
@@ -701,11 +706,13 @@ VERDICT_DISPLAY = {
         "AFFECTED": "AFFECTED",
         "NOT AFFECTED": "NOT AFFECTED",
         "CANNOT DETERMINE": "CANNOT DETERMINE",
+        "CONDITION CHECK REQUIRED": "CONDITION CHECK REQUIRED",
     },
     "ko": {
         "AFFECTED": "해당 있음",
         "NOT AFFECTED": "해당 없음",
         "CANNOT DETERMINE": "판정 불가",
+        "CONDITION CHECK REQUIRED": "조건 확인 필요",
     },
 }
 
@@ -1563,9 +1570,10 @@ def _action_lines(result, s, lang):
     """Deterministic "Action required" lines for one triage result,
     composed only from the result itself (no extra API calls):
     AFFECTED -> affected hostnames + fixed version (or the vendor
-    fix) + deadline + extracted workarounds; CANNOT DETERMINE ->
-    the conditions / missing information to verify, then the same
-    workarounds when stated; NOT AFFECTED -> no action."""
+    fix) + deadline + extracted workarounds; CANNOT DETERMINE and
+    CONDITION CHECK REQUIRED -> the conditions / missing
+    information to verify, then the same workarounds when stated;
+    NOT AFFECTED -> no action."""
     verdict = str(result.get("verdict") or "")
     extracted = result.get("extracted") or {}
     workarounds = [str(w) for w in extracted.get("workarounds") or []]
@@ -1586,7 +1594,8 @@ def _action_lines(result, s, lang):
         deadline = extracted.get("action_deadline")
         if deadline:
             lines.append(s["action_deadline"] % str(deadline))
-    elif verdict == "CANNOT DETERMINE":
+    elif verdict in ("CANNOT DETERMINE",
+                     "CONDITION CHECK REQUIRED"):
         lines.append(s["action_verify_first"])
         for condition in result.get("conditions") or []:
             lines.append("- %s" % condition)
@@ -1620,7 +1629,7 @@ def _action_one_liner(result, s, lang):
         if deadline:
             text = "%s (%s)" % (text, s["action_deadline"] % str(deadline))
         return text
-    if verdict == "CANNOT DETERMINE":
+    if verdict in ("CANNOT DETERMINE", "CONDITION CHECK REQUIRED"):
         conditions = result.get("conditions") or []
         if conditions:
             return "%s %s" % (s["action_verify_first"], conditions[0])
@@ -1644,9 +1653,10 @@ def _device_verdict_summary(results, devices, lang):
     not a verdict about the device), so a device whose rows are
     all non-candidate - or which never appears - has zero related
     advisories. Returns entries {hostname, model, version,
-    affected: [labels], cannot: [labels], not_affected: int,
-    related: int} sorted affected-first, then CANNOT DETERMINE
-    count descending, then hostname."""
+    affected: [labels], condition: [labels], cannot: [labels],
+    not_affected: int, related: int} sorted affected-first, then
+    condition count descending, then CANNOT DETERMINE count
+    descending, then hostname."""
     by_host = {}  # type: Dict[str, Dict[str, Any]]
 
     def _entry(hostname, model, version):
@@ -1655,7 +1665,8 @@ def _device_verdict_summary(results, devices, lang):
         if entry is None:
             entry = {"hostname": hostname, "model": model,
                      "version": version, "affected": [],
-                     "cannot": [], "not_affected": 0, "related": 0}
+                     "condition": [], "cannot": [],
+                     "not_affected": 0, "related": 0}
             by_host[hostname] = entry
         return entry
 
@@ -1680,6 +1691,8 @@ def _device_verdict_summary(results, devices, lang):
             status = str(row.get("status") or "")
             if status == "AFFECTED":
                 entry["affected"].append(label)
+            elif status == "CONDITION CHECK REQUIRED":
+                entry["condition"].append(label)
             elif status == "CANNOT DETERMINE":
                 entry["cannot"].append(label)
             elif status == "NOT AFFECTED":
@@ -1687,9 +1700,37 @@ def _device_verdict_summary(results, devices, lang):
     summary = [entry for entry in by_host.values()
                if entry["hostname"]]
     summary.sort(key=lambda e: (0 if e["affected"] else 1,
+                                -len(e["condition"]),
                                 -len(e["cannot"]),
                                 e["hostname"].lower()))
     return summary
+
+
+# Long result lists render inside fixed-height scrollable
+# windows so a long run cannot push the sections below the list
+# out of reach; short lists render inline as before, so samples
+# and small runs gain no dead space.
+RESULTS_SCROLL_THRESHOLD = 8
+RESULTS_SUMMARY_HEIGHT = 480
+RESULTS_DETAIL_HEIGHT = 560
+
+
+def _results_window_height(count, height):
+    # type: (int, int) -> Optional[int]
+    """The fixed height for a scrollable results window over
+    `count` rows, or None to render inline: only lists longer
+    than RESULTS_SCROLL_THRESHOLD get the window."""
+    return height if count > RESULTS_SCROLL_THRESHOLD else None
+
+
+def _scroll_window(count, height):
+    # type: (int, int) -> Any
+    """Context manager yielding a bordered fixed-height container
+    for a long list, or a no-op context for a short one."""
+    window_height = _results_window_height(count, height)
+    if window_height is None:
+        return contextlib.nullcontext()
+    return st.container(height=window_height, border=True)
 
 
 def _render_batch_results(results, s, lang, devices=None):
@@ -1701,7 +1742,8 @@ def _render_batch_results(results, s, lang, devices=None):
     if any(item.get("credit_exhausted") for item in results):
         st.warning(s["credits_exhausted_banner"])
     # Action summary first: only the advisories that need action,
-    # AFFECTED before CANNOT DETERMINE, one line + link each.
+    # AFFECTED > CONDITION CHECK REQUIRED > CANNOT DETERMINE, one
+    # line + link each.
     actionable = []  # type: List[Any]
     for idx, item in enumerate(results, start=1):
         if item.get("status") != "ok":
@@ -1710,9 +1752,11 @@ def _render_batch_results(results, s, lang, devices=None):
         if triage_result.get("error"):
             continue
         verdict = str(triage_result.get("verdict") or "")
-        if verdict in ("AFFECTED", "CANNOT DETERMINE"):
-            actionable.append((0 if verdict == "AFFECTED" else 1,
-                                 idx, item))
+        if verdict in ("AFFECTED", "CONDITION CHECK REQUIRED",
+                       "CANNOT DETERMINE"):
+            actionable.append(
+                ({"AFFECTED": 0, "CONDITION CHECK REQUIRED": 1,
+                  "CANNOT DETERMINE": 2}[verdict], idx, item))
     if actionable:
         actionable.sort(key=lambda entry: (entry[0], entry[1]))
         st.subheader(s["action_summary_heading"])
@@ -1772,8 +1816,10 @@ def _render_batch_results(results, s, lang, devices=None):
                     else s["no"])
         summary_rows.append(row)
     if summary_rows:
-        st.dataframe(summary_rows, use_container_width=True,
-                     hide_index=True)
+        with _scroll_window(len(summary_rows),
+                            RESULTS_SUMMARY_HEIGHT):
+            st.dataframe(summary_rows, use_container_width=True,
+                         hide_index=True)
 
     # Per-device verdicts: the same result rows re-aggregated by
     # host, so the fleet reads as a checklist - every inventory
@@ -1798,6 +1844,8 @@ def _render_batch_results(results, s, lang, devices=None):
                 s["model_col"]: entry["model"],
                 s["version_col"]: entry["version"],
                 verdict_display["AFFECTED"]: len(entry["affected"]),
+                verdict_display["CONDITION CHECK REQUIRED"]:
+                    len(entry["condition"]),
                 verdict_display["CANNOT DETERMINE"]:
                     len(entry["cannot"]),
                 verdict_display["NOT AFFECTED"]:
@@ -1807,12 +1855,27 @@ def _render_batch_results(results, s, lang, devices=None):
         st.dataframe(device_rows, use_container_width=True,
                      hide_index=True)
         for entry in device_summary:
+            if entry["condition"]:
+                st.caption("%s - %s: %s" % (
+                    entry["hostname"],
+                    verdict_display["CONDITION CHECK REQUIRED"],
+                    ", ".join(entry["condition"])))
+        for entry in device_summary:
             if entry["cannot"]:
                 st.caption("%s - %s: %s" % (
                     entry["hostname"],
                     verdict_display["CANNOT DETERMINE"],
                     ", ".join(entry["cannot"])))
 
+    # Per-item detail expanders: a long list scrolls inside its
+    # own fixed-height window so the sections above stay put.
+    with _scroll_window(len(results), RESULTS_DETAIL_HEIGHT):
+        _render_result_expanders(results, s, lang)
+
+
+def _render_result_expanders(results, s, lang):
+    # type: (List[Dict[str, Any]], Dict[str, Any], str) -> None
+    """One expander per batch entry, titled with its verdict."""
     for idx, item in enumerate(results, start=1):
         triage_result = item.get("triage") or {}
         verdict = str(triage_result.get("verdict") or "")
@@ -1888,6 +1951,10 @@ def _render_result(result, s, lang):
     if result.get("mode") == "mock":
         st.info(s["mock_result_note"] % (result.get("sample_id") or "unknown"))
 
+    if result.get("reason_code"):
+        st.caption("%s: %s" % (s["reason_code_label"],
+                               result["reason_code"]))
+
     claim = result.get("claim")
     if claim:
         # The claim is the exact English sentence sent to Clocked
@@ -1913,13 +1980,17 @@ def _render_result(result, s, lang):
     device_rows = []  # type: List[Dict[str, Any]]
     for row in result.get("device_results") or []:
         status = str(row.get("status") or "")
+        reason_text = str(row.get("reason") or "")
+        if row.get("reason_code"):
+            reason_text = "%s (%s)" % (reason_text,
+                                       row["reason_code"])
         device_rows.append({
             s["device_col"]: row.get("hostname"),
             s["model_col"]: row.get("model"),
             s["version_col"]: row.get("version"),
             s["candidate_col"]: s["yes"] if row.get("candidate") else s["no"],
             s["result_col"]: VERDICT_DISPLAY[lang].get(status, status),
-            s["reason_col"]: row.get("reason"),
+            s["reason_col"]: reason_text,
         })
     if device_rows:
         st.table(device_rows)

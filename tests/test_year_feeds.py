@@ -19,6 +19,9 @@ import pytest  # noqa: E402
 import batch  # noqa: E402
 from batch import (  # noqa: E402
     FULL_TRIAGE_CAP,
+    _device_product_keys,
+    _make_local_entry,
+    _screen_item,
     collect_feed_items_year,
     collect_nvd_items_year,
     parse_inventory_csv,
@@ -502,8 +505,12 @@ def test_pipeline_budget_ordering_and_exceeded_rows():
         assert "beyond this run's deep-triage budget" in \
             triage_result["action_required"]
     for row in kev_rows:
-        assert row["triage"]["verdict"] == "CANNOT DETERMINE"
+        # K-2 rows carry the CONDITION grade (bgp parity §3);
+        # budget rows above stay CANNOT DETERMINE (rule A-3).
+        assert row["triage"]["verdict"] == \
+            "CONDITION CHECK REQUIRED"
         assert row["triage"]["clocked_calls"] == 0
+    assert stats["condition_check"] == 2
     # Final row order: KEV first.
     assert rows[0]["kev"] is True
     assert rows[1]["kev"] is True
@@ -1205,6 +1212,40 @@ def test_per_device_verdicts_section_renders():
     assert "No related advisories" in frame_text
 
 
+def test_results_window_height_threshold():
+    # The scroll-window policy: only lists longer than the
+    # threshold get a fixed height; short lists render inline.
+    import app as app_module
+    assert app_module.RESULTS_SCROLL_THRESHOLD == 8
+    assert app_module._results_window_height(8, 480) is None
+    assert app_module._results_window_height(9, 480) == 480
+    assert app_module._results_window_height(0, 560) is None
+    assert app_module._results_window_height(35, 560) == 560
+
+
+def test_long_batch_results_render_in_scroll_window():
+    # 10 seeded rows (> the 8-row threshold): the summary table
+    # and the per-item expanders render inside the fixed-height
+    # scroll windows. AppTest does not introspect containers, so
+    # this asserts the rendering survives the wrapping - both
+    # tables and every expander still present, no exception.
+    inventory_text = (ROOT / "samples" / "inventory_sample.txt"
+                      ).read_text(encoding="utf-8")
+    sample1 = (ROOT / "samples" / "sample1_affected.txt"
+               ).read_text(encoding="utf-8")
+    result = run_triage(sample1, inventory_text)
+    rows = [{"status": "ok", "label": "sample1-%d" % i, "url": "",
+             "triage": result} for i in range(10)]
+    at = AppTest.from_file(APP)
+    at.session_state["batch_results"] = rows
+    at.session_state["batch_source"] = "feeds"
+    at.run()
+    assert not at.exception
+    assert len(at.dataframe) == 2
+    assert len(at.dataframe[0].value) == 10
+    assert len(at.expander) == 10
+
+
 # ------------------------- sample inventory CSV ----------------------
 
 def test_sample_inventory_csv_parses_to_eight_devices():
@@ -1406,8 +1447,12 @@ def test_pipeline_kev_no_range_becomes_kev_unconfirmed_row(
     assert len(rows) == 1
     row = rows[0]
     assert row["basis"] == "local-screen"
-    assert row["triage"]["verdict"] == "CANNOT DETERMINE"
+    # K-2 grade (bgp parity §3): the product match is settled and
+    # the open question is the version check - CONDITION, not
+    # CANNOT.
+    assert row["triage"]["verdict"] == "CONDITION CHECK REQUIRED"
     assert row["triage"]["clocked_calls"] == 0
+    assert stats["condition_check"] == 1
     assert len(row["triage"]["conditions"]) == 1
     assert "KEV" in row["triage"]["conditions"][0]
     assert row["triage"]["extracted"]["action_deadline"] == \
@@ -1417,6 +1462,110 @@ def test_pipeline_kev_no_range_becomes_kev_unconfirmed_row(
     assert stats["kev_unconfirmed"] == 1
     assert stats["deep_triaged"] == 0
     assert judged == []
+
+
+# ----------------- reason codes in the screen (§2) -------------------
+
+def test_screen_eval_codes_suffix_mismatch_precedence():
+    devices = parse_inventory("DC-SW-01, Arista 7050SX3, 4.30.5F\n")
+    item = {"label": "CVE-2026-9201", "text": "Arista EOS flaw.",
+            "cpe_ranges": [{"vendor": "Arista", "product": "EOS",
+                        "vulnerable": True,
+                        "end_including": "4.30.5M"}]}
+    evaluation = _screen_item(
+        item, devices, [_device_product_keys(d) for d in devices])
+    assert evaluation["evals"] == ["uncertain"]
+    assert evaluation["eval_codes"] == ["VERSION_SUFFIX_MISMATCH"]
+
+
+def test_screen_eval_codes_partial_clear_is_range_partial():
+    devices = parse_inventory("RTR-01, MX480, 21.4R3\n")
+    item = {"label": "JSA-2026-1", "text": "Juniper Junos flaw.",
+            "cpe_ranges": [{"vendor": "Juniper",
+                            "product": "Junos OS",
+                        "vulnerable": True, "partial": True,
+                        "end_excluding": "21.4R2"}]}
+    evaluation = _screen_item(
+        item, devices, [_device_product_keys(d) for d in devices])
+    assert evaluation["evals"] == ["uncertain"]
+    assert evaluation["eval_codes"] == ["RANGE_PARTIAL"]
+
+
+def test_local_entry_reason_codes_per_kind():
+    devices = parse_inventory("RTR-01, MX480, 21.4R3\n")
+    item = {"label": "CVE-2026-9202", "text": "Juniper Junos flaw."}
+    cleared_eval = {"evals": ["cleared"],
+                    "eval_codes": ["VERSION_OUT_OF_RANGE"],
+                    "displays": ["Juniper Junos OS"],
+                    "range_lines": []}
+    entry = _make_local_entry(item, devices, cleared_eval,
+                              "not_affected", "en")
+    assert entry["triage"]["reason_code"] == "SCREEN_CLEARED"
+    assert entry["triage"]["device_results"][0]["reason_code"] == \
+        "VERSION_OUT_OF_RANGE"
+    hit_eval = {"evals": ["hit"],
+                "eval_codes": ["VERSION_TRAIN_EQUAL"],
+                "displays": ["Juniper Junos OS"], "range_lines": []}
+    entry = _make_local_entry(item, devices, hit_eval, "budget",
+                              "en", budget=30)
+    assert entry["triage"]["reason_code"] == "BUDGET_EXHAUSTED"
+    assert entry["triage"]["device_results"][0]["reason_code"] == \
+        "VERSION_TRAIN_EQUAL"
+    kev_eval = {"evals": ["uncertain"],
+                "eval_codes": ["NO_VERSION_EVIDENCE"],
+                "displays": ["Juniper Junos OS"], "range_lines": []}
+    entry = _make_local_entry(item, devices, kev_eval,
+                              "kev_unconfirmed", "en")
+    assert entry["triage"]["reason_code"] == "KEV_NO_VERSION_RANGE"
+    assert entry["triage"]["device_results"][0]["reason_code"] == \
+        "KEV_NO_VERSION_RANGE"
+
+
+def test_local_entry_rows_localized_ko():
+    devices = parse_inventory("RTR-01, MX480, 21.4R3\n")
+    item = {"label": "CVE-2026-9203", "text": "Juniper Junos flaw."}
+    cleared_eval = {"evals": ["cleared"],
+                    "eval_codes": ["VERSION_OUT_OF_RANGE"],
+                    "displays": ["Juniper Junos OS"],
+                    "range_lines": []}
+    entry = _make_local_entry(item, devices, cleared_eval,
+                              "not_affected", "ko")
+    reason = entry["triage"]["device_results"][0]["reason"]
+    assert any("가" <= ch <= "힣" for ch in reason), reason
+
+
+def test_device_summary_counts_condition_rows():
+    rows = [{"status": "ok", "label": "KEV CVE-2026-7473",
+             "url": "",
+             "triage": {"device_results": [
+                 {"hostname": "DC-SW-01",
+                  "model": "Arista 7050SX3", "version": "4.30.5M",
+                  "candidate": True,
+                  "status": "CONDITION CHECK REQUIRED",
+                  "reason": "gated"}]}}]
+    summary = _device_verdict_summary(rows, [], "en")
+    entry = [e for e in summary
+             if e["hostname"] == "DC-SW-01"][0]
+    assert entry["condition"] == ["KEV CVE-2026-7473"]
+    assert entry["cannot"] == []
+    assert entry["related"] == 1
+
+
+def test_action_summary_includes_condition_rows():
+    inventory_text = (ROOT / "samples" / "inventory_sample.txt"
+                      ).read_text(encoding="utf-8")
+    rows, _stats = run_feed_pipeline(inventory_text, mock=True)
+    at = AppTest.from_file(APP)
+    at.session_state["batch_results"] = rows
+    at.session_state["batch_source"] = "feeds"
+    at.run()
+    assert not at.exception
+    markdown = "\n".join(m.value or "" for m in at.markdown)
+    # The KEV CONDITION row appears in the action summary, under
+    # its extracted advisory ID (the summary table is a dataframe
+    # and the per-item details are expanders, so this bolded
+    # action-line pattern occurs only in the action summary).
+    assert "- **#1 CVE-2026-7473**" in markdown
 
 
 def test_pipeline_kev_with_traced_ranges_that_hit_still_deep_triaged(
@@ -1572,3 +1721,89 @@ def test_app_summary_table_has_sources_column():
     assert "출처" in list(frame_ko.columns)
     values_ko = [str(v) for v in frame_ko["출처"]]
     assert "NVD + KEV" in values_ko
+
+
+# ---------------- EOS equality rules R1/R2 (bgp parity) -------------
+#
+# The 0137 / CVE-2026-7473 regression anchors (DESIGN-BGP-PARITY
+# §1.6): Arista CNA publishes inclusive bounds at train precision,
+# and the screen used to clear the train's own patch releases.
+
+def _eos_rng(**kwargs):
+    return _rng("eos", vendor="arista", **kwargs)
+
+
+def test_eval_range_eos_train_bound_includes_train_members():
+    rng = _eos_rng(start_including="4.28", end_including="4.31")
+    # The headline case: 4.31.1F vs end_including "4.31" was False
+    # (a false clear) before R1; it is inside now.
+    assert batch._eval_range("4.31.1F", rng) is True
+    assert batch._eval_range("4.30.5F", rng) is True
+    assert batch._eval_range(
+        "4.32.2F", _eos_rng(start_including="4.28",
+                            end_including="4.32")) is True
+    assert batch._eval_range(
+        "4.35.1F", _eos_rng(start_including="4.28",
+                            end_including="4.35")) is True
+    # A device in the start train satisfies the start bound (real
+    # comparison and R1 agree here), and one below the range stays
+    # outside by the real numeric comparison.
+    assert batch._eval_range("4.28.2F", rng) is True
+    assert batch._eval_range("4.27.9F", rng) is False
+    assert batch._eval_range(
+        "4.28.2F", _eos_rng(start_including="4.29",
+                            end_including="4.35")) is False
+
+
+def test_eval_range_eos_r2_exact_and_suffix_mismatch():
+    # R2: exact "4.36.0" names the same release as device 4.36.0F.
+    assert batch._eval_range(
+        "4.36.0F", _eos_rng(exact="4.36.0")) is True
+    # F vs M: incomparable on every path - never True, never False.
+    assert batch._eval_range(
+        "4.30.5F", _eos_rng(exact="4.30.5M")) is None
+    assert batch._eval_range(
+        "4.30.5F", _eos_rng(end_including="4.30.5M")) is None
+
+
+def test_eval_range_eos_rules_scoped_to_arista_key():
+    # The identical bounds under a Cisco product keep the generic
+    # outcomes: R1/R2 resolve from the range's own product key.
+    rng = _rng("ios_xe", start_including="4.28",
+               end_including="4.31")
+    assert batch._eval_range("4.31.1F", rng) is False
+    # And the one-sided exact stays behind the I-2 guard (None).
+    assert batch._eval_range(
+        "4.36.0F", _rng("ios_xe", exact="4.36.0")) is None
+
+
+def test_eval_range_detail_reports_eos_flavours():
+    assert batch._eval_range_detail(
+        "4.31.1F", _eos_rng(end_including="4.31")) == \
+        (True, "train_equal")
+    assert batch._eval_range_detail(
+        "4.36.0F", _eos_rng(exact="4.36.0")) == \
+        (True, "suffix_equal")
+    assert batch._eval_range_detail(
+        "4.30.5F", _eos_rng(exact="4.30.5M")) == \
+        (None, "suffix_mismatch")
+    assert batch._eval_range_detail(
+        "17.9.4", _rng("ios_xe", end_excluding="17.9.5")) == \
+        (True, None)
+
+
+def test_screen_item_0137_eval_is_hit_not_cleared():
+    devices = parse_inventory(
+        "DC-SW-01, Arista 7050SX3, 4.31.1F\n")
+    item = _item("CVE-2026-7473", [
+        _eos_rng(start_including="4.28", end_including="4.31")])
+    evaluation = batch._screen_item(
+        item, devices,
+        [batch._device_product_keys(d) for d in devices])
+    assert evaluation["evals"] == ["hit"]
+    assert evaluation["outcome"] == "candidate"
+    rows, candidates, stats = screen_feed_items(
+        [item], "DC-SW-01, Arista 7050SX3, 4.31.1F\n")
+    assert rows == []
+    assert [c["label"] for c in candidates] == ["CVE-2026-7473"]
+    assert stats["uncertain_candidates"] == 0
